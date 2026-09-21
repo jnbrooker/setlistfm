@@ -9,8 +9,9 @@ their own and means one stage blowing up cannot corrupt another's state.
     1. sync        setlistfm_db.py sync         new + edited setlists from the API
     2. categories  artist_categories.py refresh kworb pull, thresholds, A-E tiers
     3. pollstar    build_events.py load-pollstar box office  (only with --pollstar)
-    4. events      build_events.py build        bills, routing, categories, Pollstar
-    5. export      build_events.py export       events.csv  (only with --export)
+    4. fixtures    build_events.py load-fixtures sport fixtures (only with --fixtures)
+    5. events      build_events.py build        bills, routing, categories, Pollstar, sport
+    6. export      build_events.py export       events.csv  (only with --export)
 
 THREE WAYS TO RUN IT
 --------------------
@@ -52,7 +53,10 @@ STEPS = [
     # opt-in: re-reading the 135MB Pollstar workbook takes ~3 minutes and is
     # only needed when that file changes, not on every run
     ("pollstar", ["build_events.py", "load-pollstar"], False),
-    ("events", ["build_events.py", "build"], True),
+    # opt-in for the same reason: the sporting fixtures live in the dashboard
+    # workbook's Event Data tab and only change when that file does
+    ("fixtures", ["build_events.py", "load-fixtures"], False),
+    ("events", ["build_events.py", "build"], True),   # gets --rematch when --pollstar is set
     ("export", ["build_events.py", "export"], False),
 ]
 
@@ -160,7 +164,9 @@ def one_pass(args):
             # user named it explicitly with --only
             if not always and not getattr(args, name, False) and not args.only:
                 continue
-            status, took = run_step(name, argv, handle, args.timeout)
+            # a reloaded Pollstar file is the one case the match must be redone
+            extra = ["--rematch"] if name == "events" and getattr(args, "pollstar", False) else ()
+            status, took = run_step(name, argv, handle, args.timeout, extra)
             results.append((name, status, took))
             if status in ("failed", "timeout") and not args.keep_going:
                 log(f"!! stopping: {name} did not succeed "
@@ -273,6 +279,9 @@ def add_run_flags(p):
     p.add_argument("--pollstar", action="store_true",
                    help="Also reload pollstar-data.xlsx (~3 min). Only needed "
                         "when that file has changed.")
+    p.add_argument("--fixtures", action="store_true",
+                   help="Also reload the sporting fixtures from the dashboard "
+                        "workbook's Event Data tab. Only needed when it changes.")
     p.add_argument("--skip", nargs="*", default=[],
                    choices=[s[0] for s in STEPS], help="Stages to leave out.")
     p.add_argument("--only", nargs="*", default=None,

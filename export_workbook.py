@@ -9,7 +9,9 @@ WHAT IT CHANGES
 
   Event Data   replaced with events from the database: everything at a curated
                arena since --from, in Category A/B/C plus the non-Artist types
-               (family, entertainment, comedy, sport). ~67,600 rows.
+               (family, entertainment, comedy, sport). Sporting rows come
+               from the fixtures table and Pollstar's Sports genre, with
+               competition/result filled where known.
   Arena Data   replaced with every venue appearing in that Event Data. Curated
                columns (owner, opened year, verification and so on) are carried
                across from the template for arenas it already knew; venues new
@@ -186,7 +188,8 @@ SELECT e.venue, e.city, e.country, e.date_iso, e.headliner, e.support,
        e.pollstar_price_min, e.pollstar_price_max, e.pollstar_price_avg,
        e.pollstar_venue_id, e.arena_id, e.n_artists, e.category, e.tour,
        e.setlist_ids, e.setlist_urls, e.num_songs, e.latitude, e.longitude,
-       e.previous_city, e.next_city, e.venue_uid, e.pollstar_id
+       e.previous_city, e.next_city, e.venue_uid, e.pollstar_id,
+       COALESCE(e.source, 'setlistfm'), e.competition, e.result
 FROM events e
 WHERE e.date_iso >= ?
   AND (e.category IN ('Category A','Category B','Category C')
@@ -219,7 +222,7 @@ def event_records(con, since, curated_only, headers):
          market, run_shows, run_tickets, avg_tickets, capacity, cap_pct,
          gross, pmin, pmax, pavg, ps_venue, arena_id, n_artists, category,
          tour, sl_ids, sl_urls, songs, lat, lon, prev_city, next_city,
-         venue_uid, ps_id) = r
+         venue_uid, ps_id, source, competition, result) = r
         rec = [None] * n
         rec[0] = venue
         rec[1] = city
@@ -231,7 +234,8 @@ def event_records(con, since, curated_only, headers):
         rec[7] = genre
         rec[8] = promoter
         rec[9] = market
-        # K competition, L result: sports fields, not held in the database
+        rec[10] = competition
+        rec[11] = result
         rec[12] = run_shows
         rec[13] = run_tickets
         rec[14] = avg_tickets
@@ -243,7 +247,7 @@ def event_records(con, since, curated_only, headers):
         rec[20] = pmax
         rec[21] = pavg
         # W currency: not carried on events
-        rec[23] = "pollstar+setlistfm" if ps_id else "setlistfm"
+        rec[23] = source if source != "setlistfm" else ("pollstar+setlistfm" if ps_id else "setlistfm")
         # Y pollstar_event_id: the export carries no Pollstar event id
         rec[25] = ps_venue
         rec[26] = arena_id
@@ -257,7 +261,7 @@ def event_records(con, since, curated_only, headers):
         rec[40] = songs
         rec[41] = float(lat) if lat not in (None, "") else None
         rec[42] = float(lon) if lon not in (None, "") else None
-        rec[43] = "pollstar+setlistfm" if ps_id else "setlistfm"
+        rec[43] = source if source != "setlistfm" else ("pollstar+setlistfm" if ps_id else "setlistfm")
         rec[44] = prev_city
         rec[45] = next_city
         rec[46] = 1

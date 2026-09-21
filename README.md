@@ -34,7 +34,13 @@ streamlit run dashboard.py
 ```
 
 `pipeline.py run` on its own does all three stages. Add `--pollstar` when the
-Pollstar workbook changes and `--export` to write `events.csv`. It logs to
+Pollstar workbook changes, `--fixtures` when the dashboard's Event Data tab
+changes, and `--export` to write `events.csv`.
+
+A rebuild keeps the Pollstar matches it already has and only matches events
+that are new since the last build, because the match is the slow part and its
+inputs rarely change. `--pollstar` (or `build_events.py build --rematch`) redoes
+it from scratch. `build_events.py add-sport` redoes just the sporting rows. It logs to
 `logs/`, takes a lock so two runs cannot overlap, and stops at the first failure.
 
 ## The scripts
@@ -62,6 +68,9 @@ Reference, loaded from the workbooks and kworb:
 - `ref_spotify`, `ref_pollstar`, `ref_dashboard_categories`, `category_thresholds`
 - `ref_hospitality`, `ref_fx_rates`
 - `pollstar_events` — box-office rows, matched to events by date, artist and venue
+- `fixtures` — sporting fixtures that have no setlist and are not in the Pollstar
+  file (the EuroLeague games scraped into the dashboard's Event Data tab), loaded
+  by `build_events.py load-fixtures`
 
 Derived, dropped and rebuilt on every run:
 
@@ -70,7 +79,11 @@ Derived, dropped and rebuilt on every run:
   `capacity_source` saying whether that came from the curated sheet, from
   Pollstar's reported figures, or was inferred
 - `events` — one row per show: the bill combined, category attached, tour
-  routing, and Pollstar box office where it matched
+  routing, and Pollstar box office where it matched. `source` says where a row
+  came from: `setlistfm` (a setlist), `fixture`, or `pollstar` (a Sports-genre
+  box-office row with no setlist). Sporting rows are tiered Tenant / Non-Tenant
+  from the dashboard's categorisation where it knows the entity, otherwise by the
+  tenant test below.
 
 Because the derived tables are a pure function of the raw layer plus the
 reference data, a wrong answer is never repaired in place. Fix the rule and

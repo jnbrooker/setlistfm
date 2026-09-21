@@ -25,7 +25,8 @@ otherwise from the venue name (venue_io.py), otherwise 'unknown'.
 USAGE
     python since2023.py                              # Category A, B, C
     python since2023.py --categories A B C D E       # everyone
-    python since2023.py --categories all             # incl. non-artist events
+    python since2023.py --categories all             # incl. non-artist + sporting events
+    python since2023.py --categories A B C TENANT NONTENANT
     python since2023.py --since 2020-01-01 --out since2020
     python since2023.py --no-infer                   # DB labels only
 """
@@ -51,6 +52,8 @@ CATEGORY_LABELS = {
     "A": "Category A", "B": "Category B", "C": "Category C",
     "D": "Category D", "E": "Category E",
     "OTHER": "Family, Entertainment, Comedy & Other",
+    "TENANT": "Tenant Sporting Event",
+    "NONTENANT": "Non-Tenant Sporting Event",
 }
 DEFAULT_CATEGORIES = ["A", "B", "C"]
 
