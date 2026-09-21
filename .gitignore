@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------- credentials
+# never commit these. setlistfm_key.txt.example shows the shape.
+setlistfm_key.txt
+apis.txt
+*.key
+.env
+
+# ------------------------------------------------------------------- the data
+# the database is ~4GB and fully rebuildable below the `setlists` layer;
+# GitHub's hard limit is 100MB per file in any case.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# source workbooks (pollstar-data.xlsx is 135MB, over GitHub's limit)
+*.xlsx
+*.xlsm
+*.xls
+
+# generated tables and working exports
+*.csv
+!*.example.csv
+
+# ------------------------------------------------------------- runtime state
+setlistfm_state/
+logs/
+.pipeline.lock
+
+# written by `pipeline.py install-task`, holds a machine-specific python path
+run_pipeline.bat
+
+# ------------------------------------------------------- old work, kept local
+archive/
+
+# ------------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------- misc
+.DS_Store
+Thumbs.db
+*.tmp

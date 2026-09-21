@@ -1,0 +1,8 @@
+# Copy this file to setlistfm_key.txt and put your setlist.fm API key on the
+# line below, with no quotes. That file is git-ignored.
+#
+# Get a key: https://api.setlist.fm/docs/1.0/index.html
+# The standard tier allows 2 requests/second; the upgraded tier 16/sec and
+# 50,000/day, which is what the scrapers are tuned for.
+#
+# $SETLISTFM_API_KEY overrides this file if it is set.
