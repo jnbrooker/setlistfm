@@ -46,6 +46,8 @@ Pollstar workbook changes and `--export` to write `events.csv`. It logs to
 | `build_events.py` | collapses setlists into events, picks the headliner, routes previous/next city, matches Pollstar, and assembles the venue table. |
 | `pipeline.py` | runs the above in order, with logging and locking. |
 | `dashboard.py` | the Streamlit front end. |
+| `since2023.py` | the Italy / Southern-Italy analysis workbooks (top venues, indoor/outdoor by city, tour legs, tour funnel, seasonality) built from `events` into `since2023/`. `--categories A B C` picks the artist tiers; `--since` moves the window. |
+| `venue_io.py` | indoor/outdoor from a venue's name, used by `since2023.py` where the database has no label. |
 | `paths.py` | every default path, resolved against this folder rather than the working directory. |
 
 ## The data model

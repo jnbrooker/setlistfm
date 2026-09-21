@@ -46,3 +46,6 @@ env/
 .DS_Store
 Thumbs.db
 *.tmp
+
+# analysis workbooks and charts built by since2023.py
+since2023/
