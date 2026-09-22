@@ -9,6 +9,7 @@ their own and means one stage blowing up cannot corrupt another's state.
     1. sync        setlistfm_db.py sync         new + edited setlists from the API
     2. categories  artist_categories.py refresh kworb pull, thresholds, A-E tiers
     3. pollstar    build_events.py load-pollstar box office  (only with --pollstar)
+    4. arenas      build_events.py load-arenas   arenas + aliases (only with --arenas)
     4. fixtures    build_events.py load-fixtures sport fixtures (only with --fixtures)
     5. events      build_events.py build        bills, routing, categories, Pollstar, sport
     6. export      build_events.py export       events.csv  (only with --export)
@@ -53,6 +54,9 @@ STEPS = [
     # opt-in: re-reading the 135MB Pollstar workbook takes ~3 minutes and is
     # only needed when that file changes, not on every run
     ("pollstar", ["build_events.py", "load-pollstar"], False),
+    # opt-in: rebuilds the arenas table and the venue-name alias map from the
+    # dashboard workbook. Only needed when that workbook's Arena Data changes.
+    ("arenas", ["build_events.py", "load-arenas"], False),
     # opt-in for the same reason: the sporting fixtures live in the dashboard
     # workbook's Event Data tab and only change when that file does
     ("fixtures", ["build_events.py", "load-fixtures"], False),
@@ -124,17 +128,23 @@ def run_step(name, argv, handle, timeout, extra=()):
     cmd = [sys.executable, script] + list(argv[1:]) + list(extra)
     log(f"-- {name}: {' '.join(argv)}", handle)
     started = time.monotonic()
+    # streamed rather than captured: a stage can run for tens of minutes, and
+    # waiting for it to exit before printing anything makes a slow stage
+    # indistinguishable from a hung one
+    proc = subprocess.Popen(cmd, cwd=HERE, text=True, bufsize=1,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
-        proc = subprocess.run(cmd, cwd=HERE, timeout=timeout, text=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out = proc.returncode
+        for line in proc.stdout:
+            log(f"   | {line.rstrip()}", handle)
+        out = proc.wait(timeout=max(1, timeout - (time.monotonic() - started)))
     except subprocess.TimeoutExpired:
+        proc.kill()
         log(f"   {name}: TIMED OUT after {timeout}s", handle)
         return "timeout", time.monotonic() - started
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
     took = time.monotonic() - started
-
-    for line in (proc.stdout or "").splitlines():
-        log(f"   | {line}", handle)
     if out == 0:
         log(f"   {name}: ok in {took/60:.1f} min", handle)
         return "ok", took
@@ -279,6 +289,9 @@ def add_run_flags(p):
     p.add_argument("--pollstar", action="store_true",
                    help="Also reload pollstar-data.xlsx (~3 min). Only needed "
                         "when that file has changed.")
+    p.add_argument("--arenas", action="store_true",
+                   help="Also reload the Arena Data tab (arenas + venue name "
+                        "aliases). Only needed when that tab has changed.")
     p.add_argument("--fixtures", action="store_true",
                    help="Also reload the sporting fixtures from the dashboard "
                         "workbook's Event Data tab. Only needed when it changes.")

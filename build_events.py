@@ -26,20 +26,24 @@ WHAT IT DOES
 4. Attaches Pollstar box-office data (tickets sold, capacity, gross, promoter,
    ticket prices) where a Pollstar row can be matched to the event. Most events
    will have none -- Pollstar covers reported shows only -- which is expected.
-5. Adds SPORTING events, which never have a setlist and so cannot come from
-   step 1: every row of the `fixtures` table (loaded from the dashboard's
-   Event Data tab by `load-fixtures` -- the EuroLeague games live nowhere else)
-   plus every Pollstar row with a Sports genre that step 4 left unmatched.
-   They are tiered Tenant / Non-Tenant Sporting Event from the dashboard's own
-   categorisation where it knows the entity, otherwise by the tenant test in
-   artist_categories.py. `events.source` says where each row came from.
+5. Adds the events that never have a setlist and so cannot come from step 1:
+   every row of the `fixtures` table (loaded from the dashboard's Event Data
+   tab by `load-fixtures` -- the EuroLeague games live nowhere else) plus every
+   Pollstar row step 4 left unmatched whose genre is NOT music: sport, family
+   entertainment, comedy and theatrical. Nobody logs a setlist for Disney on
+   Ice, so an unmatched row there is a real missing event rather than a failed
+   match -- which is why unmatched MUSIC rows are deliberately left out, as
+   those are usually a setlist event whose match failed.
+   Sport is tiered Tenant / Non-Tenant, the rest become "Family, Entertainment,
+   Comedy & Other", both from the dashboard's own categorisation where it knows
+   the entity. `events.source` says where each row came from.
 
 USAGE
     python build_events.py load-pollstar   # pollstar-data.xlsx -> pollstar_events
     python build_events.py load-fixtures   # dashboard Event Data sport rows -> fixtures
     python build_events.py build           # rebuild events; Pollstar matches are kept
     python build_events.py build --rematch # ... and redo the Pollstar join from scratch
-    python build_events.py add-sport       # just redo the sporting rows on the existing events
+    python build_events.py add-nonmusic    # just redo those rows on the existing events
     python build_events.py match-pollstar  # redo just the join
     python build_events.py status          # what's in it
     python build_events.py export          # -> events.csv
@@ -194,6 +198,9 @@ CREATE TABLE IF NOT EXISTS arena_aliases (
     source      TEXT,          -- name | also_known_as | matched_venue | manual
     city_norm   TEXT,
     country     TEXT,
+    ambiguous   INTEGER DEFAULT 0,  -- 1 when this spelling names >1 arena
+                                    -- ("O2 Arena" is London AND Prague), so the
+                                    -- name alone must not decide the match
     PRIMARY KEY (alias_norm, arena_id)
 );
 CREATE INDEX IF NOT EXISTS ix_arena_alias ON arena_aliases(alias_norm);
@@ -300,6 +307,12 @@ POLLSTAR_COLUMNS = [
     # where the row came from: setlistfm | fixture | pollstar. Sport rows carry
     # the fixture's competition/result; everything else leaves them blank.
     ("source", "TEXT"), ("competition", "TEXT"), ("result", "TEXT"),
+    # 1 on an added Pollstar row when a setlist event already exists at that
+    # venue on that date -- i.e. it may be the same show, matched badly, rather
+    # than a missing one. Left in rather than dropped: two different shows at
+    # one venue on one day is normal (matinee + evening, a festival), so this
+    # flags them for judgement instead of guessing.
+    ("duplicate_risk", "INTEGER"),
 ]
 
 # How the raw rows are keyed into events and ranked within one.
@@ -402,7 +415,7 @@ EXPORT_COLUMNS = [
     "pollstar_promoter", "pollstar_run_shows", "pollstar_tickets_sold",
     "pollstar_capacity", "pollstar_capacity_pct", "pollstar_gross_usd",
     "pollstar_price_min", "pollstar_price_max", "pollstar_price_avg",
-    "event_id", "setlist_urls", "competition", "result",
+    "event_id", "setlist_urls", "competition", "result", "duplicate_risk",
 ]
 
 
@@ -417,20 +430,27 @@ except ImportError:            # tqdm is nice-to-have, never required
 
 
 def progress(iterable, desc, total=None, unit="rows"):
-    """tqdm when it is installed, a quiet periodic log line when it is not."""
-    if _tqdm is not None:
+    """
+    tqdm at a terminal, periodic log lines otherwise.
+
+    A bar redraws with carriage returns and never emits a newline, so under
+    pipeline.py -- which reads a stage's output a line at a time -- it would
+    arrive as one enormous line at the end. Off a tty we print instead.
+    """
+    if _tqdm is not None and sys.stderr.isatty():
         return _tqdm(iterable, desc=desc, total=total, unit=unit,
                      unit_scale=True, file=sys.stderr, leave=False,
                      dynamic_ncols=True, mininterval=0.5)
+
+    every = max(1, (total // 20) if total else 50000)
 
     def fallback():
         n = 0
         for item in iterable:
             yield item
             n += 1
-            if n % 50000 == 0:
-                log(f"   {desc}: {n:,}"
-                    + (f" / {total:,}" if total else ""))
+            if n % every == 0:
+                log(f"   {desc}: {n:,}" + (f" / {total:,}" if total else ""))
     return fallback()
 
 
@@ -457,6 +477,9 @@ def connect(path):
     conn.execute("PRAGMA cache_size=-1500000")
     conn.execute("PRAGMA mmap_size=4294967296")
     conn.create_function("norm_key", 1, norm_key, deterministic=True)
+    conn.create_function("genre_class", 1, genre_class, deterministic=True)
+    conn.create_function("event_type_for_genre", 1, event_type_for_genre,
+                         deterministic=True)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
@@ -613,6 +636,7 @@ def build_arena_aliases(conn):
     reconciliation, and finally a hand-maintained CSV for anything those miss.
     """
     log("== building arena_aliases ==")
+    ensure_columns(conn)          # arena_aliases.ambiguous on an older database
     have = {r[1] for r in conn.execute("PRAGMA table_info(arenas)")}
     conn.execute("DELETE FROM arena_aliases")
     rows = []
@@ -647,7 +671,20 @@ def build_arena_aliases(conn):
     conn.executemany("INSERT OR IGNORE INTO arena_aliases "
                      "(alias_norm, arena_id, alias, source, city_norm, country) "
                      "VALUES (?,?,?,?,?,?)", rows)
+    conn.execute("""UPDATE arena_aliases SET ambiguous = (
+                        SELECT COUNT(DISTINCT a2.arena_id) > 1 FROM arena_aliases a2
+                        WHERE a2.alias_norm = arena_aliases.alias_norm)""")
     conn.commit()
+    amb = list(conn.execute("""SELECT alias_norm, COUNT(DISTINCT arena_id),
+                                      group_concat(alias || ' (' || city_norm || ', '
+                                                   || country || ')', ' | ')
+                               FROM arena_aliases WHERE ambiguous = 1
+                               GROUP BY 1 ORDER BY 2 DESC"""))
+    if amb:
+        log(f"   {len(amb)} spelling(s) name more than one arena; these are matched "
+            f"by city, then country, and skipped if neither agrees:")
+        for alias_norm, n, who in amb:
+            log(f"      {alias_norm}  ->  {who}")
     total = scalar(conn, "SELECT COUNT(*) FROM arena_aliases") or 0
     arenas = scalar(conn, "SELECT COUNT(DISTINCT arena_id) FROM arena_aliases") or 0
     for src, n in conn.execute("SELECT source, COUNT(*) FROM arena_aliases "
@@ -806,7 +843,47 @@ def cmd_load_pollstar(args, conn):
 
 
 SPORT_TYPES = ("Tenant Sporting Event", "Non-Tenant Sporting Event")
+OTHER_TYPE = "Family, Entertainment, Comedy & Other"
 EVENT_SHEET = "Event Data"
+
+# The dashboard's Artist Categorisation tab carries a genre_class per act, and
+# the order below is the precedence its own rows imply -- verified against all
+# 11,662 of them. Note "Sports Entertainment" (WWE and the like) is
+# ENTERTAINMENT, not Sport: it is a show, not a fixture.
+_G_SPORT = {"sports", "basketball"}
+_G_SPORT_ENT = {"sports entertainment"}
+_G_COMEDY = {"comedy"}
+_G_FAMILY = {"family entertainment"}
+_G_ENTERTAINMENT = {"theatrical", "spoken word", "multimedia", "awards show"}
+
+
+def genre_class(genre):
+    """Pollstar's comma-separated genre -> the dashboard's class."""
+    parts = {g.strip().lower() for g in str(genre or "").split(",") if g.strip()}
+    if parts & _G_SPORT:
+        return "Sport"
+    if parts & _G_SPORT_ENT:
+        return "Entertainment"
+    if parts & _G_COMEDY:
+        return "Comedy"
+    if parts & _G_FAMILY:
+        return "Family"
+    if parts & _G_ENTERTAINMENT:
+        return "Entertainment"
+    return "Music"
+
+
+def event_type_for_genre(genre):
+    """The event_type a non-music Pollstar row should get (None = leave it out)."""
+    k = genre_class(genre)
+    if k == "Sport":
+        return SPORT_PLACEHOLDER
+    if k in ("Family", "Entertainment", "Comedy"):
+        return OTHER_TYPE
+    return None
+
+
+SPORT_PLACEHOLDER = "Sporting Event (unclassified)"
 
 
 def cmd_load_fixtures(args, conn):
@@ -907,10 +984,10 @@ SELECT
 FROM fixtures
 """
 
-# Pollstar rows with a Sports genre that the box-office match left unmatched
-# (i.e. no setlist for them, which for sport is all of them). One row = one
-# event dated at the run's start; pollstar_run_shows keeps the run length.
-INSERT_POLLSTAR_SPORT_EVENTS = """
+# Unmatched Pollstar rows whose genre is not music. One Pollstar row = one
+# event dated at the run's start; a row covering a six-night run of a family
+# show stays a single event, with pollstar_run_shows saying it was six.
+INSERT_POLLSTAR_NONMUSIC_EVENTS = """
 INSERT OR IGNORE INTO events (
     event_id, date_iso, eventDate, venue_key, venue, city, state, country,
     headliner, headliner_key, support, artists, n_artists, tour, num_songs,
@@ -928,7 +1005,8 @@ SELECT
     substr(p.start_iso, 9, 2) || '-' || substr(p.start_iso, 6, 2) || '-' || substr(p.start_iso, 1, 4),
     'pollstar|' || COALESCE(p.venue,'') || '|' || COALESCE(p.city,''),
     p.venue, p.city, p.state, p.country, p.headliner, LOWER(TRIM(p.headliner)),
-    p.support, p.headliner, 1, '', 0, ?, ?, '', '', ?,
+    p.support, p.headliner, 1, '', 0,
+    event_type_for_genre(p.genre), event_type_for_genre(p.genre), '', '', ?,
     p.headliner_norm, p.venue_norm, p.city_norm, p.arena_id, 'pollstar',
     p.id, 'sport row', 0, p.headliner, p.support, p.venue, p.venue_id,
     p.venue_type, p.market, p.genre, p.promoter, p.n_shows,
@@ -936,20 +1014,20 @@ SELECT
     p.total_tickets, p.total_gross_usd, p.price_min, p.price_max, p.price_avg,
     p.start_iso, p.end_iso
 FROM pollstar_events p
-WHERE p.genre LIKE '%Sport%'
+WHERE event_type_for_genre(p.genre) IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.pollstar_id = p.id)
 """
 
-# the dashboard's own tiering of a sporting entity, where it has one
-CATEGORISE_SPORT_FROM_DASHBOARD = """
+# The dashboard's own label for an entity beats anything derived from genre --
+# it is hand-maintained, and it is what the workbook's own numbers were built on.
+CATEGORISE_FROM_DASHBOARD = """
 UPDATE events SET event_type = r.event_type, category = r.event_type
-FROM (SELECT norm_key(headliner) AS hk, event_type
+FROM (SELECT norm_key(headliner) AS hk, MIN(event_type) AS event_type
       FROM ref_dashboard_categories
-      WHERE event_type IN ('Tenant Sporting Event', 'Non-Tenant Sporting Event')
+      WHERE event_type <> 'Artist'
       GROUP BY 1) r
 WHERE events.source IN ('fixture', 'pollstar')
   AND events.headliner_norm = r.hk
-  AND events.event_type = 'Sporting Event (unclassified)'
 """
 
 # otherwise the tenant test from artist_categories.py -- enough dates overall
@@ -1006,29 +1084,31 @@ def sport_thresholds(conn):
     return t
 
 
-def add_sport_events(conn):
-    """Append fixtures and unmatched Pollstar sport rows to events, then tier them."""
+def add_nonmusic_events(conn):
+    """
+    Append fixtures and unmatched non-music Pollstar rows to events, then label
+    them: the dashboard's own categorisation where it knows the act, otherwise
+    the tenant test for sport and the genre class for everything else.
+    """
     now = utcnow()
-    placeholder = "Sporting Event (unclassified)"
     conn.execute("DELETE FROM events WHERE source IN ('fixture', 'pollstar')")
-    conn.execute(INSERT_FIXTURE_EVENTS, (placeholder, placeholder, now))
-    n_fx = conn.total_changes
+    conn.execute(INSERT_FIXTURE_EVENTS, (SPORT_PLACEHOLDER, SPORT_PLACEHOLDER, now))
     n_fx = scalar(conn, "SELECT COUNT(*) FROM events WHERE source='fixture'") or 0
     have_ps = scalar(conn, "SELECT COUNT(*) FROM pollstar_events") or 0
     if have_ps:
-        # the NOT EXISTS below probes events by pollstar_id for every Sports
+        # the NOT EXISTS below probes events by pollstar_id for every candidate
         # row; without this index that is a full scan of events per row
         conn.execute("CREATE INDEX IF NOT EXISTS ix_events_psid ON events(pollstar_id)")
-        conn.execute(INSERT_POLLSTAR_SPORT_EVENTS, (placeholder, placeholder, now))
+        conn.execute(INSERT_POLLSTAR_NONMUSIC_EVENTS, (now,))
     n_ps = scalar(conn, "SELECT COUNT(*) FROM events WHERE source='pollstar'") or 0
     conn.commit()
     if not (n_fx or n_ps):
-        log("   no sporting rows to add (fixtures empty, no Sports genre in Pollstar)")
+        log("   nothing to add (fixtures empty, no non-music rows left unmatched)")
         return
 
-    conn.execute(CATEGORISE_SPORT_FROM_DASHBOARD)
-    from_sheet = scalar(conn, "SELECT COUNT(*) FROM events WHERE source IN ('fixture','pollstar') "
-                              "AND event_type <> ?", (placeholder,)) or 0
+    # rowcount is this statement's rows; total_changes would be every change
+    # made on the connection since it opened
+    from_sheet = conn.execute(CATEGORISE_FROM_DASHBOARD).rowcount
     t = sport_thresholds(conn)
     conn.execute(CATEGORISE_SPORT_BY_TENANT_TEST,
                  (t["tenant_min_dates"],
@@ -1036,29 +1116,54 @@ def add_sport_events(conn):
                   t["tenant_min_dates"], t["tenant_min_per_venue"]))
     conn.commit()
 
+    # flag added rows that land on a venue+date a setlist event already occupies
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_events_vnorm_date "
+                 "ON events(venue_norm, date_iso)")
+    conn.execute("""UPDATE events SET duplicate_risk = 1
+                    WHERE source IN ('fixture','pollstar')
+                      AND venue_norm <> ''
+                      AND EXISTS (SELECT 1 FROM events e2
+                                  WHERE e2.venue_norm = events.venue_norm
+                                    AND e2.date_iso   = events.date_iso
+                                    AND COALESCE(e2.source,'setlistfm') = 'setlistfm')""")
+    conn.commit()
+    dup = scalar(conn, "SELECT COUNT(*) FROM events WHERE duplicate_risk = 1") or 0
+    if dup:
+        log(f"   {dup:,} added rows share a venue and date with a setlist event "
+            f"(duplicate_risk = 1) - kept, but check before counting them")
+
+    left = scalar(conn, "SELECT COUNT(*) FROM events WHERE event_type = ?",
+                  (SPORT_PLACEHOLDER,)) or 0
+    if left:
+        log(f"   !! {left:,} rows still unclassified - falling back to Non-Tenant")
+        conn.execute("UPDATE events SET event_type='Non-Tenant Sporting Event', "
+                     "category='Non-Tenant Sporting Event' WHERE event_type=?",
+                     (SPORT_PLACEHOLDER,))
+        conn.commit()
+
     # arena facts for the new rows (the setlist rows had theirs attached during
     # the Pollstar match); fixtures may carry the dashboard's arena_id already
     have_arenas = scalar(conn, "SELECT COUNT(*) FROM arenas") or 0
     if have_arenas:
-        conn.execute("""UPDATE events SET arena_id = (
-                            SELECT al.arena_id FROM arena_aliases al
-                            WHERE al.alias_norm = events.venue_norm)
-                        WHERE source IN ('fixture','pollstar') AND arena_id IS NULL
-                          AND venue_norm <> ''""")
+        resolve_by_alias(conn, "events", keep_existing=True,
+                         only="source IN ('fixture','pollstar')")
         conn.execute(ATTACH_ARENA)
         conn.commit()
 
-    log(f"   {n_fx:,} fixture rows + {n_ps:,} Pollstar sport rows added; "
-        f"{from_sheet:,} tiered from the dashboard's categorisation, "
-        f"{n_fx + n_ps - from_sheet:,} by the tenant test "
-        f"(>= {t['tenant_min_dates']:g} dates and >= {t['tenant_min_per_venue']:g} at one venue, within a year)")
+    log(f"   {n_fx:,} fixture rows + {n_ps:,} unmatched non-music Pollstar rows added "
+        f"({from_sheet:,} labelled from the dashboard's own categorisation; sport not "
+        f"named there uses the tenant test: >= {t['tenant_min_dates']:g} dates and "
+        f">= {t['tenant_min_per_venue']:g} at one venue within a year)")
+    for k, n in conn.execute("""SELECT genre_class(pollstar_genre), COUNT(*) FROM events
+                                WHERE source='pollstar' GROUP BY 1 ORDER BY 2 DESC"""):
+        log(f"      genre class {k or '(none)':16s} {n:7,}")
     for cat, n in conn.execute("""SELECT event_type, COUNT(*) FROM events
                                   WHERE source IN ('fixture','pollstar')
                                   GROUP BY 1 ORDER BY 2 DESC"""):
-        log(f"      {cat:32s} {n:7,}")
+        log(f"      {cat:40s} {n:7,}")
 
 
-def match_sql(slack, only_new=False):
+def match_sql(slack, only_new=False, year=None):
     """
     Build the match statement. `slack` widens the Pollstar date window by N days
     each way, for the cases where the two sources disagree about which calendar
@@ -1074,8 +1179,19 @@ def match_sql(slack, only_new=False):
     lo = f"date(p.start_iso, '-{int(slack)} day')" if slack else "p.start_iso"
     hi = f"date(p.end_iso, '+{int(slack)} day')" if slack else "p.end_iso"
     # incremental mode: only events that did not exist in the previous build
-    new_only = ("AND NOT EXISTS (SELECT 1 FROM prev_event_ids x WHERE x.event_id = e.event_id)"
-                if only_new else "")
+    # "never been matched" is recorded on the row itself (pollstar_match NULL),
+    # so it survives a crash; a snapshot of what merely existed would not
+    new_only = "AND e.pollstar_match IS NULL" if only_new else ""
+    # One year at a time: it lets the run report progress and resume after a
+    # crash, and it prunes BOTH sides -- a Pollstar row whose run ended before
+    # the year started can never match an event inside it -- so the whole job
+    # is no more work than the single statement it replaces.
+    if year is None:
+        window = ""
+    else:
+        window = (f"AND e.date_iso BETWEEN '{year}-01-01' AND '{year}-12-31' "
+                  f"AND p.end_iso >= date('{year}-01-01', '-{int(slack) + 1} day') "
+                  f"AND p.start_iso <= date('{year}-12-31', '+{int(slack) + 1} day')")
     return f"""
 WITH cand AS (
     SELECT e.event_id, p.id AS pid,
@@ -1092,6 +1208,7 @@ WITH cand AS (
     JOIN pollstar_events p
       ON p.headliner_norm = e.headliner_norm
      AND e.date_iso BETWEEN {lo} AND {hi}
+     {window}
     WHERE e.headliner_norm <> ''
       {new_only}
       AND ((p.arena_id IS NOT NULL AND p.arena_id = e.arena_id)
@@ -1144,6 +1261,7 @@ def ensure_columns(conn):
     wanted = {
         "events": POLLSTAR_COLUMNS,
         "pollstar_events": [("arena_id", "TEXT")],
+        "arena_aliases": [("ambiguous", "INTEGER DEFAULT 0")],
     }
     for table, cols in wanted.items():
         have = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
@@ -1164,19 +1282,21 @@ UPDATE pollstar_events SET arena_id = (
 WHERE TRIM(COALESCE(venue_id,'')) <> ''
 """
 
-RESOLVE_PS_ARENA_BY_NAME = """
-UPDATE pollstar_events SET arena_id = (
-    SELECT al.arena_id FROM arena_aliases al
-    WHERE al.alias_norm = pollstar_events.venue_norm)
-WHERE arena_id IS NULL AND venue_norm <> ''
-"""
+# Matching a venue by name alone merges a building with its own former names
+# (Manchester Arena / MEN Arena / AO Arena) -- which is the point -- but it also
+# merges two different buildings that happen to share a name, and "The O2 Arena"
+# in London normalises to the same key as "O2 Arena" in Prague. So resolution
+# runs in passes: an unambiguous spelling matches on the name alone (renames
+# keep merging however the city is spelled), while a spelling that names more
+# than one arena has to agree on city, then country, and is left unmatched when
+# neither does. Written as separate statements because a correlated reference
+# to the outer table is only legal in a subquery's WHERE, not its ORDER BY.
+_ALIAS_PASSES = [
+    ("unambiguous name", "al.ambiguous = 0", ""),
+    ("ambiguous, city agrees", "al.ambiguous = 1", " AND al.city_norm = {t}.city_norm"),
+    ("ambiguous, country agrees", "al.ambiguous = 1", " AND al.country = {t}.country"),
+]
 
-RESOLVE_EVENT_ARENA = """
-UPDATE events SET arena_id = (
-    SELECT al.arena_id FROM arena_aliases al
-    WHERE al.alias_norm = events.venue_norm)
-WHERE venue_norm <> ''
-"""
 
 ATTACH_ARENA = """
 UPDATE events SET
@@ -1187,6 +1307,40 @@ UPDATE events SET
 FROM arenas a
 WHERE a.arena_id = events.arena_id
 """
+
+
+def _alias_sql(table, where_extra, cond, first_pass):
+    """One resolution pass for `table` (events or pollstar_events)."""
+    return f"""
+        UPDATE {table} SET arena_id = (
+            SELECT al.arena_id FROM arena_aliases al
+            WHERE al.alias_norm = {table}.venue_norm
+              AND {where_extra}{cond.format(t=table)}
+            ORDER BY al.arena_id LIMIT 1)
+        WHERE {"" if first_pass else "arena_id IS NULL AND "}venue_norm <> ''
+    """
+
+
+def resolve_by_alias(conn, table, keep_existing=False, only=""):
+    """
+    Put an arena_id on `table` from arena_aliases, most trustworthy pass first.
+
+    `keep_existing` leaves rows that already have an id alone (Pollstar rows
+    resolved by their own venue id); `only` is an extra WHERE fragment.
+    """
+    total = 0
+    for i, (label, where_extra, cond) in enumerate(_ALIAS_PASSES):
+        sql = _alias_sql(table, where_extra, cond,
+                         first_pass=(i == 0 and not keep_existing))
+        if only:
+            sql = sql.rstrip() + f" AND {only}"
+        before = scalar(conn, f"SELECT COUNT(*) FROM {table} WHERE arena_id IS NOT NULL") or 0
+        conn.execute(sql)
+        after = scalar(conn, f"SELECT COUNT(*) FROM {table} WHERE arena_id IS NOT NULL") or 0
+        if after - before:
+            log(f"      {label:26s} {after - before:+9,}")
+        total = after
+    return total
 
 
 def resolve_arenas(conn):
@@ -1207,12 +1361,10 @@ def resolve_arenas(conn):
     conn.execute(RESOLVE_PS_ARENA)
     by_id = scalar(conn, "SELECT COUNT(*) FROM pollstar_events "
                          "WHERE arena_id IS NOT NULL") or 0
-    conn.execute(RESOLVE_PS_ARENA_BY_NAME)
-    ps_total = scalar(conn, "SELECT COUNT(*) FROM pollstar_events "
-                            "WHERE arena_id IS NOT NULL") or 0
+    ps_total = resolve_by_alias(conn, "pollstar_events", keep_existing=True)
     conn.execute("CREATE INDEX IF NOT EXISTS ix_ps_arena "
                  "ON pollstar_events(arena_id, start_iso)")
-    conn.execute(RESOLVE_EVENT_ARENA)
+    resolve_by_alias(conn, "events")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_events_arena ON events(arena_id)")
     conn.execute(ATTACH_ARENA)
     conn.commit()
@@ -1239,7 +1391,11 @@ def snapshot_pollstar_matches(conn):
     """
     conn.execute("DROP TABLE IF EXISTS prev_event_ids")
     conn.execute("DROP TABLE IF EXISTS prev_pollstar")
-    conn.execute("CREATE TEMP TABLE prev_event_ids AS SELECT event_id FROM events")
+    # every event the matcher has already been run over, matched or not. Keyed
+    # on pollstar_match rather than mere existence so that a build which dies
+    # midway cannot leave events permanently invisible to the next match.
+    conn.execute("CREATE TEMP TABLE prev_event_ids AS SELECT event_id FROM events "
+                 "WHERE pollstar_match IS NOT NULL")
     conn.execute("CREATE INDEX temp.ix_prev_ids ON prev_event_ids(event_id)")
     cols = ", ".join(PRESERVE_COLUMNS)
     conn.execute(f"""CREATE TEMP TABLE prev_pollstar AS
@@ -1249,7 +1405,7 @@ def snapshot_pollstar_matches(conn):
     conn.commit()
     n_ids = scalar(conn, "SELECT COUNT(*) FROM prev_event_ids") or 0
     n_ps = scalar(conn, "SELECT COUNT(*) FROM prev_pollstar") or 0
-    log(f"   kept {n_ps:,} Pollstar matches across {n_ids:,} existing events")
+    log(f"   kept {n_ps:,} Pollstar matches; {n_ids:,} events already matched or tried")
     return n_ids
 
 
@@ -1257,6 +1413,11 @@ def restore_pollstar_matches(conn):
     sets = ", ".join(f"{c} = pp.{c}" for c in PRESERVE_COLUMNS)
     conn.execute(f"""UPDATE events SET {sets}
                      FROM prev_pollstar pp WHERE pp.event_id = events.event_id""")
+    # events tried last time and found nothing keep their 'none' marker, so the
+    # next match skips them too
+    conn.execute("""UPDATE events SET pollstar_match = 'none'
+                    WHERE pollstar_match IS NULL
+                      AND event_id IN (SELECT event_id FROM prev_event_ids)""")
     conn.commit()
     return scalar(conn, "SELECT COUNT(*) FROM events WHERE pollstar_id IS NOT NULL") or 0
 
@@ -1321,18 +1482,46 @@ def cmd_match_pollstar(args, conn, only_new=False):
     checkpoint(conn, "before the match")
     resolve_arenas(conn)
     if only_new:
-        n_new = scalar(conn, """SELECT COUNT(*) FROM events e WHERE NOT EXISTS
-                                (SELECT 1 FROM prev_event_ids x WHERE x.event_id = e.event_id)""") or 0
-        log(f"   matching {n_new:,} new events only (date slack +/-{args.date_slack} days) ...")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_events_psmatch ON events(pollstar_match)")
+        n_new = scalar(conn, "SELECT COUNT(*) FROM events WHERE pollstar_match IS NULL") or 0
+        log(f"   matching {n_new:,} never-matched events (date slack +/-{args.date_slack} days) ...")
     else:
         conn.execute("""UPDATE events SET pollstar_id=NULL, pollstar_match=NULL,
                         pollstar_date_offset=NULL, pollstar_headliner=NULL,
                         pollstar_tickets_sold=NULL, pollstar_gross_usd=NULL,
                         pollstar_capacity=NULL""")
         log(f"   matching everything (date slack +/-{args.date_slack} days) ...")
-    conn.execute(match_sql(args.date_slack, only_new=only_new))
-    conn.commit()
+    run_match(conn, args.date_slack, only_new=only_new)
     _pollstar_summary(conn)
+
+
+def run_match(conn, slack, only_new=False):
+    """
+    Match year by year, so the run can report progress and pick up where it
+    stopped. Only the years Pollstar actually covers are visited; an event
+    outside that range cannot match anything, so it is marked straight away.
+    """
+    lo = scalar(conn, "SELECT MIN(start_iso) FROM pollstar_events") or ""
+    hi = scalar(conn, "SELECT MAX(end_iso) FROM pollstar_events") or ""
+    if not (lo and hi):
+        log("   pollstar_events has no dates - nothing to match")
+        return
+    years = list(range(int(lo[:4]), int(hi[:4]) + 1))
+    log(f"   Pollstar covers {lo[:4]}-{hi[:4]}; matching {len(years)} years")
+    matched = 0
+    for y in progress(years, "matching pollstar", total=len(years), unit="year"):
+        conn.execute(match_sql(slack, only_new=only_new, year=y))
+        # mark this year done, so a crash resumes from here rather than redoing it
+        conn.execute(f"""UPDATE events SET pollstar_match = 'none'
+                         WHERE pollstar_match IS NULL
+                           AND date_iso BETWEEN '{y}-01-01' AND '{y}-12-31'""")
+        conn.commit()
+        got = scalar(conn, "SELECT COUNT(*) FROM events WHERE pollstar_id IS NOT NULL") or 0
+        log(f"      {y}  {got - matched:+7,} matches")
+        matched = got
+    # everything outside Pollstar's date range can never match
+    conn.execute("UPDATE events SET pollstar_match = 'none' WHERE pollstar_match IS NULL")
+    conn.commit()
 
 
 def _pollstar_summary(conn):
@@ -1342,7 +1531,7 @@ def _pollstar_summary(conn):
     log(f"   {matched:,} of {n_ev:,} events matched "
         f"({100.0*matched/n_ev:.1f}%)" if n_ev else "   no events")
     for tier, n in conn.execute("""SELECT pollstar_match, COUNT(*) FROM events
-                                   WHERE pollstar_id IS NOT NULL
+                                   WHERE pollstar_id IS NOT NULL AND pollstar_match <> 'none'
                                    GROUP BY 1 ORDER BY 2 DESC"""):
         log(f"      matched on {tier:6s} {n:9,}")
     for off, n in conn.execute("""SELECT pollstar_date_offset, COUNT(*) FROM events
@@ -1607,11 +1796,11 @@ def cmd_build(args, conn):
         log(f"   {kept:,} matches restored")
         cmd_match_pollstar(args, conn, only_new=True)
 
-    stage(steps - 1, steps, "adding sporting events (fixtures + Pollstar sport rows)")
+    stage(steps - 1, steps, "adding non-music events (fixtures + unmatched Pollstar)")
     if args.no_sport:
         log("   skipped (--no-sport)")
     else:
-        add_sport_events(conn)
+        add_nonmusic_events(conn)
 
     stage(steps, steps, "assembling venues")
     cmd_build_venues(args, conn)
@@ -1620,14 +1809,14 @@ def cmd_build(args, conn):
     _summary(conn)
 
 
-def cmd_add_sport(args, conn):
-    """Redo just the sporting rows on the existing events, then refresh venues."""
+def cmd_add_nonmusic(args, conn):
+    """Redo just the fixture / Pollstar rows on the existing events, then venues."""
     ensure_columns(conn)
     if not (scalar(conn, "SELECT COUNT(*) FROM events") or 0):
         raise SystemExit("events is empty - run `build` first.")
-    log("== adding sporting events to the existing events table ==")
+    log("== adding non-music events to the existing events table ==")
     checkpoint(conn, "before starting")
-    add_sport_events(conn)
+    add_nonmusic_events(conn)
     if args.no_venues:
         log("   venues left as they are (--no-venues)")
     else:
@@ -1752,7 +1941,7 @@ def main():
     b.add_argument("--no-pollstar", action="store_true",
                    help="Skip the Pollstar match.")
     b.add_argument("--no-sport", action="store_true",
-                   help="Leave out fixtures and Pollstar sport rows.")
+                   help="Leave out fixtures and unmatched non-music Pollstar rows.")
     b.add_argument("--rematch", action="store_true",
                    help="Redo the Pollstar match from scratch instead of keeping "
                         "the existing matches (use after load-pollstar).")
@@ -1763,14 +1952,14 @@ def main():
                         "the Pollstar range (default 1).")
     b.set_defaults(func=cmd_build)
 
-    asp = sub.add_parser("add-sport",
-                         help="Redo just the sporting rows (fixtures + Pollstar "
-                              "sport rows) on the existing events, then venues.")
+    asp = sub.add_parser("add-nonmusic", aliases=["add-sport"],
+                         help="Redo just the fixture and unmatched non-music Pollstar "
+                              "rows on the existing events, then venues.")
     asp.add_argument("--review-min-events", type=int, default=20,
                      help="Flag venues with at least this many events for enrichment.")
     asp.add_argument("--no-venues", action="store_true",
                      help="Skip the venues rebuild (fine when only the tiering changed).")
-    asp.set_defaults(func=cmd_add_sport)
+    asp.set_defaults(func=cmd_add_nonmusic)
 
     bv = sub.add_parser("build-venues",
                         help="Assemble the persistent venues table from events, "

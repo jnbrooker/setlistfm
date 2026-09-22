@@ -40,7 +40,7 @@ changes, and `--export` to write `events.csv`.
 A rebuild keeps the Pollstar matches it already has and only matches events
 that are new since the last build, because the match is the slow part and its
 inputs rarely change. `--pollstar` (or `build_events.py build --rematch`) redoes
-it from scratch. `build_events.py add-sport` redoes just the sporting rows. It logs to
+it from scratch. `build_events.py add-nonmusic` redoes just the fixture and Pollstar rows. It logs to
 `logs/`, takes a lock so two runs cannot overlap, and stops at the first failure.
 
 ## The scripts
@@ -80,10 +80,15 @@ Derived, dropped and rebuilt on every run:
   Pollstar's reported figures, or was inferred
 - `events` — one row per show: the bill combined, category attached, tour
   routing, and Pollstar box office where it matched. `source` says where a row
-  came from: `setlistfm` (a setlist), `fixture`, or `pollstar` (a Sports-genre
-  box-office row with no setlist). Sporting rows are tiered Tenant / Non-Tenant
-  from the dashboard's categorisation where it knows the entity, otherwise by the
-  tenant test below.
+  came from: `setlistfm` (a setlist), `fixture`, or `pollstar` (a box-office row
+  with no setlist). Pollstar rows are added only when their genre is **not
+  music** — sport, family entertainment, comedy, theatrical — because nobody logs
+  a setlist for those, whereas an unmatched music row is usually a setlist event
+  whose match failed. Sport is tiered Tenant / Non-Tenant, the rest become
+  "Family, Entertainment, Comedy & Other", from the dashboard's own
+  categorisation where it names the act and otherwise from genre + the tenant
+  test. `duplicate_risk = 1` marks an added row sharing a venue and date with a
+  setlist event — kept, but worth a look before counting it.
 
 Because the derived tables are a pure function of the raw layer plus the
 reference data, a wrong answer is never repaired in place. Fix the rule and
