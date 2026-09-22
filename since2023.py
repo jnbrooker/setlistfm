@@ -18,6 +18,9 @@ you ask for, and writes to since2023/ :
   seasonality.xlsx                 shows by month and by day-of-year for
                                    Europe and Italy, all / inside / outside
                                    (+ .png)
+  outdoor_by_capacity.xlsx         outdoor events in Italy and Europe bucketed
+                                   by venue capacity, with the venues behind
+                                   each bucket                  (+ .png)
 
 Indoor/outdoor comes from the database's venue label where it has one,
 otherwise from the venue name (venue_io.py), otherwise 'unknown'.
@@ -29,6 +32,7 @@ USAGE
     python since2023.py --categories A B C TENANT NONTENANT
     python since2023.py --since 2020-01-01 --out since2020
     python since2023.py --no-infer                   # DB labels only
+    python since2023.py --only capacity              # one output, others untouched
 """
 
 import argparse
@@ -404,7 +408,87 @@ def seasonality(df, a, categories, out, charts=True):
     log(f"seasonality: Europe {len(eu):,} events, Italy {len(it):,}")
 
 
+# ------------------------------------------------- 6. outdoor by capacity
+
+CAP_BANDS = [0, 1_000, 2_500, 5_000, 10_000, 20_000, 40_000, 60_000, 10**9]
+CAP_LABELS = ["under 1,000", "1,000-2,499", "2,500-4,999", "5,000-9,999", "10,000-19,999",
+              "20,000-39,999", "40,000-59,999", "60,000+"]
+
+
+def outdoor_by_capacity(df, a, categories, out, charts=True):
+    """Outdoor events bucketed by the venue's best-known capacity, Italy and Europe."""
+    od = df[df["io"] == "outside"].copy()
+    od["capacity"] = pd.to_numeric(od["venue_capacity"], errors="coerce")
+    od["band"] = pd.cut(od["capacity"], CAP_BANDS, labels=CAP_LABELS, right=False).astype(object)
+    od["band"] = od["band"].where(od["capacity"].notna(), "capacity unknown")
+    order = CAP_LABELS + ["capacity unknown"]
+
+    regions = {"Italy": od[od["country"] == "Italy"], "Europe": od[od["countryCode"].isin(EUROPE)]}
+    tables = {}
+    for region, d in regions.items():
+        g = (d.groupby("band").agg(events=("event_id", "size"), venues=("venue_uid", "nunique"),
+                                   headliners=("headliner", "nunique"))
+             .reindex(order, fill_value=0))
+        known = g.loc[CAP_LABELS, "events"].sum()
+        g["% of events with known capacity"] = [round(v / known, 4) if (known and b != "capacity unknown") else None
+                                                for b, v in zip(g.index, g["events"])]
+        g["% of all outdoor events"] = (g["events"] / len(d)).round(4) if len(d) else None
+        g.index.name = "capacity band"
+        tables[region] = g
+
+    def most_common(s):
+        m = s.dropna().mode()
+        return m.iloc[0] if len(m) else None
+
+    venues = (od[od["countryCode"].isin(EUROPE)]
+              .groupby("venue_uid")
+              .agg(venue=("venue", most_common), city=("city", most_common), country=("country", most_common),
+                   capacity=("capacity", "max"), capacity_source=("venue_capacity_source", most_common),
+                   band=("band", most_common), venue_type=("venue_type", most_common),
+                   io_source=("io_source", most_common), events=("event_id", "size"),
+                   headliners=("headliner", "nunique"), first_event=("event_dt", "min"), last_event=("event_dt", "max"))
+              .sort_values(["capacity", "events"], ascending=[False, False]).reset_index(drop=True))
+
+    with pd.ExcelWriter(out, engine="openpyxl") as xw:
+        for region, g in tables.items():
+            g.to_excel(xw, sheet_name=f"{region} by capacity")
+        venues[venues["country"] == "Italy"].to_excel(xw, sheet_name="Italy outdoor venues", index=False)
+        venues.to_excel(xw, sheet_name="Europe outdoor venues", index=False)
+        methodology(xw, "Outdoor events by venue capacity", common_notes(a, categories, len(df)) + [
+            "Outdoor = events whose venue is labelled 'outside' (see above). Capacity = venue_capacity on the event: "
+            "the dashboard's curated figure where the venue is a curated arena, otherwise the largest Pollstar-reported "
+            "capacity seen at that venue. Venues with no figure fall in 'capacity unknown'.",
+            "Bands are by the venue's capacity, so a 4,000-capacity gig at a 60,000 stadium counts as 60,000+ - this is "
+            "about where outdoor shows happen, not how many tickets were sold.",
+            f"Europe = countryCode in {' '.join(sorted(EUROPE))}.",
+            "'% of events with known capacity' excludes the unknown row; '% of all outdoor events' includes it.",
+            "The venue sheets list every outdoor venue behind the counts with its capacity and where that came from.",
+        ])
+        autosize(xw)
+
+    if charts:
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        for ax, (region, g) in zip(axes, tables.items()):
+            y = np.arange(len(order))
+            ax.barh(y, g["events"], color=[C_OUTSIDE] * len(CAP_LABELS) + ["#BBBBBB"], edgecolor="black", linewidth=0.3)
+            ax.set_yticks(y, order); ax.invert_yaxis()
+            for i, (n, v) in enumerate(zip(g["events"], g["venues"])):
+                if n:
+                    ax.text(n, i, f"  {n:,} events / {v:,} venues", va="center", fontsize=8)
+            ax.set_xlim(0, g["events"].max() * 1.35 if g["events"].max() else 1)
+            ax.set_xlabel("Outdoor events"); ax.set_title(f"{region}: outdoor events by venue capacity (since {a.since})")
+            ax.grid(axis="x", linestyle="--", alpha=0.5)
+        fig.tight_layout(); fig.savefig(out.replace(".xlsx", ".png"), dpi=150); plt.close(fig)
+    it, eu = tables["Italy"], tables["Europe"]
+    log(f"outdoor by capacity: Italy {int(it['events'].sum()):,} outdoor events "
+        f"({int(it.loc['capacity unknown', 'events']):,} unknown capacity); Europe {int(eu['events'].sum()):,} "
+        f"({int(eu.loc['capacity unknown', 'events']):,} unknown)")
+
+
 # ------------------------------------------------------------------ main
+
+OUTPUTS = ["venues", "indoor", "legs", "funnel", "seasonality", "capacity"]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -417,6 +501,8 @@ def main():
     ap.add_argument("--min-shows", type=int, default=5, help="'substantial tour' threshold in the funnel")
     ap.add_argument("--no-infer", action="store_true", help="indoor/outdoor from database labels only")
     ap.add_argument("--no-charts", action="store_true")
+    ap.add_argument("--only", nargs="+", default=None, choices=list(OUTPUTS),
+                    help="build only these outputs (others are left untouched): " + " ".join(OUTPUTS))
     a = ap.parse_args()
 
     categories = parse_categories(a.categories)
@@ -427,11 +513,16 @@ def main():
 
     charts = not a.no_charts
     p = lambda name: os.path.join(a.out, name)
-    italy_top_venues(df, a, categories, p("italy_top_venues.xlsx"))
-    italy_indoor_outdoor(df, a, categories, p("italy_indoor_outdoor_by_city.xlsx"), charts=charts)
-    southern_tour_legs(df, a, categories, p("southern_italy_tour_legs.xlsx"), top=a.top_cities, charts=charts)
-    tour_funnel(df, a, categories, p("tour_funnel.xlsx"), min_shows=a.min_shows)
-    seasonality(df, a, categories, p("seasonality.xlsx"), charts=charts)
+    builders = {
+        "venues":      lambda: italy_top_venues(df, a, categories, p("italy_top_venues.xlsx")),
+        "indoor":      lambda: italy_indoor_outdoor(df, a, categories, p("italy_indoor_outdoor_by_city.xlsx"), charts=charts),
+        "legs":        lambda: southern_tour_legs(df, a, categories, p("southern_italy_tour_legs.xlsx"), top=a.top_cities, charts=charts),
+        "funnel":      lambda: tour_funnel(df, a, categories, p("tour_funnel.xlsx"), min_shows=a.min_shows),
+        "seasonality": lambda: seasonality(df, a, categories, p("seasonality.xlsx"), charts=charts),
+        "capacity":    lambda: outdoor_by_capacity(df, a, categories, p("outdoor_by_capacity.xlsx"), charts=charts),
+    }
+    for name in (a.only or OUTPUTS):
+        builders[name]()
     log(f"done -> {a.out}")
 
 
