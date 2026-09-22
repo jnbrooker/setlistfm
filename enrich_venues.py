@@ -66,9 +66,16 @@ USER_AGENT = ("setlistfm-venue-enrichment/1.0 "
               "(live-music venue research; contact: repository owner)")
 MANUAL_CSV = paths.here("venue_enrichment_manual.csv")
 
-# Be a good citizen: the API allows far more, but nothing here is urgent.
-REQS_PER_SEC = 3.0
-MAX_RETRIES = 5
+# Nothing here is urgent, and going too fast is actively slower: a burst of
+# quick requests then a 5+10+20+40s backoff works out far worse than a steady
+# trickle. Measured against Wikimedia during their WDQS outage, 3/s and even
+# 1/s were refused within a handful of calls, so the client STARTS slow and
+# earns its way up rather than opening at a pace it will be denied.
+START_GAP_SEC = 5.0       # opening pace: one request every 5 seconds
+MIN_GAP_SEC = 1.0         # the fastest it will ever go, once it has earned it
+MAX_GAP_SEC = 60.0        # and the slowest it will crawl before giving up
+MAX_RETRIES = 6
+SPEEDUP_AFTER = 20        # consecutive successes before trying slightly faster
 
 # Wikidata properties we read
 P_CAPACITY, P_COORD, P_ADMIN, P_COUNTRY, P_INSTANCE, P_INCEPTION = (
@@ -119,11 +126,25 @@ def utcnow():
 class Wikidata:
     """Thin MediaWiki client: paced, retried, and it counts what it used."""
 
-    def __init__(self, reqs_per_sec=REQS_PER_SEC):
-        self.gap = 1.0 / reqs_per_sec
+    def __init__(self, start_gap=START_GAP_SEC, min_gap=MIN_GAP_SEC):
+        self.min_gap = min_gap              # the fastest we are willing to go
+        self.gap = max(start_gap, min_gap)  # the pace we are actually using
         self.last = 0.0
         self.calls = 0
+        self.throttled = 0
+        self.ok_streak = 0
         self.label_cache = {}
+
+    def _slower(self):
+        self.gap = min(MAX_GAP_SEC, max(self.gap * 2, START_GAP_SEC))
+        self.ok_streak = 0
+        self.throttled += 1
+
+    def _maybe_faster(self):
+        self.ok_streak += 1
+        if self.ok_streak >= SPEEDUP_AFTER and self.gap > self.min_gap:
+            self.gap = max(self.min_gap, self.gap * 0.8)
+            self.ok_streak = 0
 
     def _get(self, params):
         params.setdefault("format", "json")
@@ -138,11 +159,14 @@ class Wikidata:
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
                 with urllib.request.urlopen(req, timeout=45) as r:
                     self.calls += 1
+                    self._maybe_faster()
                     return json.load(r)
             except urllib.error.HTTPError as e:
                 if e.code in (429, 503) and attempt < MAX_RETRIES - 1:
+                    self._slower()
                     back = 2 ** attempt * 5
-                    log(f"   HTTP {e.code}; backing off {back}s")
+                    log(f"   HTTP {e.code}; now pacing at {self.gap:.1f}s "
+                        f"between requests, waiting {back}s")
                     time.sleep(back)
                     continue
                 raise
@@ -398,10 +422,10 @@ def cmd_pull(args, con):
     if not rows:
         log("nothing to look up - every venue above the threshold has been checked")
         return 0
-    wd = Wikidata(reqs_per_sec=args.rate)
-    log(f"looking up {len(rows):,} venues on Wikidata at up to {args.rate}/s "
-        f"(Wikimedia throttling decides the real pace, so the ETA below is "
-        f"measured as it goes, not guessed)")
+    wd = Wikidata(start_gap=args.start_gap, min_gap=args.min_gap)
+    log(f"looking up {len(rows):,} venues on Wikidata, opening at one request "
+        f"every {args.start_gap:g}s (slows on refusal, speeds up to a floor of "
+        f"{args.min_gap:g}s when accepted). The ETA below is measured, not guessed.")
 
     # A bar at a terminal; periodic lines with a measured ETA when the output is
     # piped or redirected, because a long job that prints nothing for minutes at
@@ -460,7 +484,8 @@ def cmd_pull(args, con):
             con.commit()
         if use_bar:
             it.set_postfix(high=tally["High"], med=tally["Medium"],
-                           miss=tally["no match"], refresh=False)
+                           miss=tally["no match"], pace=f"{wd.gap:.1f}s",
+                           refresh=False)
         elif i % args.progress_every == 0 or i == len(rows):
             elapsed = time.monotonic() - started
             per = elapsed / i
@@ -469,7 +494,8 @@ def cmd_pull(args, con):
                 f"high={tally['High']:,} med={tally['Medium']:,} "
                 f"low={tally['Low']:,} miss={tally['no match']:,}  "
                 f"{per:.1f}s/venue, ~{eta / 60:.0f} min left  "
-                f"({wd.calls:,} API calls)")
+                f"({wd.calls:,} calls, pacing {wd.gap:.1f}s, "
+                f"{wd.throttled} throttles)")
     if use_bar:
         it.close()
     con.commit()
@@ -540,7 +566,10 @@ def main():
     pl = sub.add_parser("pull", help="Look venues up on Wikidata.")
     pl.add_argument("--limit", type=int, default=500, help="venues per run")
     pl.add_argument("--min-events", type=int, default=20)
-    pl.add_argument("--rate", type=float, default=REQS_PER_SEC, help="requests/sec")
+    pl.add_argument("--start-gap", type=float, default=START_GAP_SEC,
+                    help="seconds between requests to open with (default 5)")
+    pl.add_argument("--min-gap", type=float, default=MIN_GAP_SEC,
+                    help="fastest pace it may speed up to (default 1s)")
     pl.add_argument("--progress-every", type=int, default=10,
                     help="venues between progress lines when not at a terminal")
     pl.add_argument("--country", nargs="+", default=None,
