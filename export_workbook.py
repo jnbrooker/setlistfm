@@ -12,6 +12,11 @@ WHAT IT CHANGES
                (family, entertainment, comedy, sport). Sporting rows come
                from the fixtures table and Pollstar's Sports genre, with
                competition/result filled where known.
+  Currency     every Pollstar money column is already USD, so the sheet's
+               currency, currency_iso, fx_units_per_gbp, gross_gbp and
+               ticket_price_avg_gbp are filled in here using the USD rate from
+               ref_fx_rates. They used to be left blank, which left the
+               dashboard's sterling figures empty until someone patched them.
   Arena Data   replaced with every venue appearing in that Event Data. Curated
                columns (owner, opened year, verification and so on) are carried
                across from the template for arenas it already knew; venues new
@@ -174,8 +179,17 @@ def blank_rows(first, last, n_cols):
 
 
 def retarget(formula, row):
-    """Point a template formula at a different row: $F2 -> $F57, AK2 -> AK57."""
-    return re.sub(r"(\$?[A-Z]{1,2}\$?)2\b", lambda m: m.group(1) + "\x00", formula)
+    """
+    Point a template formula at a different row: $F2 -> $F57, AK2 -> AK57.
+
+    Only RELATIVE row references move. An absolute one ($B$2, or a spill such
+    as $DM$2#) is pinned on purpose and has to stay: in_scope compares each
+    row's slug against the one cell holding the venue the dashboard is showing,
+    so walking that reference down the sheet puts every row out of scope and
+    every panel reads zero. The old pattern ended `\\$?)2`, which swallowed the
+    `$` of an absolute row and retargeted it along with the rest.
+    """
+    return re.sub(r"(\$?[A-Z]{1,2})2\b", lambda m: m.group(1) + "\x00", formula)
 
 
 # ------------------------------------------------------------------- the data
@@ -211,11 +225,40 @@ def iso_to_date(s):
         return None
 
 
+def gbp_rate(con):
+    """
+    USD per GBP, from ref_fx_rates (loaded with the arena workbook).
+
+    Every money column Pollstar gives us is already in USD -- its `currency`
+    field records what was taken at the box office, but the figures themselves
+    are converted, which you can see in the data: average gross divided by
+    tickets equals the stated average price to three decimal places in USD,
+    Euro, Sterling, Canadian, Australian and Swiss rows alike. So one rate
+    converts the lot.
+    """
+    row = con.execute("SELECT units_per_gbp, basis FROM ref_fx_rates "
+                      "WHERE iso = 'USD'").fetchone()
+    if not row or not row[0]:
+        log("!! no USD rate in ref_fx_rates - leaving the GBP columns blank "
+            "(run `build_events.py load-arenas` to load them)")
+        return None, None
+    return float(row[0]), row[1]
+
+
 def event_records(con, since, curated_only, headers):
     sql = EVENT_SQL.format(
         arena_filter="AND e.arena_id IS NOT NULL" if curated_only else "")
     rows = con.execute(sql, (since,)).fetchall()
     n = len(headers)
+    rate, basis = gbp_rate(con)
+    if rate:
+        log(f"   money columns: USD, converted at {rate} USD/GBP ({basis})")
+    # find the currency columns by name, so a reordered sheet cannot silently
+    # write them into the wrong place
+    hx = {str(h).strip().lower(): i for i, h in enumerate(headers) if h}
+    i_cur, i_iso = hx.get("currency"), hx.get("currency_iso")
+    i_fx, i_ggbp = hx.get("fx_units_per_gbp"), hx.get("gross_gbp")
+    i_pgbp = hx.get("ticket_price_avg_gbp")
     out = []
     for r in rows:
         (venue, city, country, date_iso, headliner, support, genre, promoter,
@@ -253,7 +296,19 @@ def event_records(con, since, curated_only, headers):
         rec[26] = arena_id
         rec[27] = n_artists
         rec[28] = category
-        # AD..AG currency/fx: left blank, the sheet's own columns
+        # currency / FX. Filled only where there is actually money on the row,
+        # so a setlist-only event is not labelled with a currency it never had.
+        if rate and any(v is not None for v in (gross, pmin, pmax, pavg)):
+            if i_cur is not None:
+                rec[i_cur] = "USD"
+            if i_iso is not None:
+                rec[i_iso] = "USD"
+            if i_fx is not None:
+                rec[i_fx] = rate
+            if i_ggbp is not None and gross is not None:
+                rec[i_ggbp] = round(gross / rate, 2)
+            if i_pgbp is not None and pavg is not None:
+                rec[i_pgbp] = round(pavg / rate, 2)
         # AH..AK support_*: left blank, recomputed by the sheet if wanted
         rec[37] = tour
         rec[38] = sl_ids
