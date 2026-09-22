@@ -72,6 +72,11 @@ DEFAULT_EXPORT = paths.EVENTS_CSV
 POLLSTAR_WORKBOOK = paths.POLLSTAR_WORKBOOK
 ARENA_WORKBOOK = paths.ARENA_WORKBOOK
 ARENA_SHEET = "Arena Data"
+
+# An observed capacity this many times a venue's average, over at least this
+# many shows, is treated as a bad row rather than a bigger configuration.
+OUTLIER_RATIO = 3
+OUTLIER_MIN_SAMPLES = 3
 ARENA_ALIASES_MANUAL = paths.ARENA_ALIASES_MANUAL
 
 # Arena Data columns that should be stored as numbers rather than text.
@@ -235,10 +240,14 @@ CREATE TABLE IF NOT EXISTS venues (
     capacity_observed_max     INTEGER,       -- from Pollstar box office
     capacity_observed_typical INTEGER,
     capacity_samples     INTEGER,
+    capacity_rejected    INTEGER,            -- an observed max discarded as an
+                                             -- outlier; kept so the call is auditable
+    review_reason        TEXT,
     venue_type           TEXT,
     venue_type_source    TEXT,
     outside_inside       TEXT,
     outside_inside_source TEXT,
+    coords_source        TEXT,          -- events (often a city centroid) | wikidata
     pollstar_venue_id    TEXT,
     needs_review         INTEGER DEFAULT 0,  -- worth enriching from the web
     updated_at           TEXT
@@ -246,6 +255,33 @@ CREATE TABLE IF NOT EXISTS venues (
 CREATE INDEX IF NOT EXISTS ix_venues_events ON venues(events DESC);
 CREATE INDEX IF NOT EXISTS ix_venues_review ON venues(needs_review, events DESC);
 CREATE INDEX IF NOT EXISTS ix_venues_norm   ON venues(venue_norm);
+
+-- Venue facts looked up from Wikidata (see enrich_venues.py). RAW, like
+-- pollstar_events and fixtures: written only by its own command and never by
+-- `build`, because `venues` is dropped and rebuilt every run and `arenas` is
+-- dropped by `load-arenas`, so anything scraped into either would not survive.
+-- `build-venues` reads it and lets it fill gaps the dashboard has not covered.
+CREATE TABLE IF NOT EXISTS ref_venue_enrichment (
+    venue_uid      TEXT PRIMARY KEY,   -- venue_norm|city_norm|countryCode
+    venue          TEXT,               -- what we called it when we looked it up
+    city           TEXT,
+    country        TEXT,
+    status         TEXT,               -- matched | no match (recorded so a re-run
+                                       -- does not keep asking about the misses)
+    capacity       INTEGER,
+    venue_type     TEXT,
+    outside_inside TEXT,
+    latitude       TEXT,
+    longitude      TEXT,
+    opened_year    INTEGER,
+    wikidata_id    TEXT,
+    wikipedia_page TEXT,
+    source         TEXT,               -- wikidata | manual
+    confidence     TEXT,               -- High | Medium | Low
+    match_method   TEXT,
+    checked_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_enrich_status ON ref_venue_enrichment(status, confidence);
 
 -- Hospitality packages, straight from the dashboard workbook. Small and
 -- hand-maintained, so it is simply mirrored rather than derived.
@@ -1622,6 +1658,32 @@ def cmd_build_venues(args, conn):
         WHERE TRIM(COALESCE(venue_uid,'')) <> ''
         GROUP BY venue_uid""")
     conn.commit()
+
+    # `capacity` used to be MAX(pollstar_capacity), so one mis-keyed row set a
+    # building's size for good -- a Wheatland amphitheatre came out at 186,000
+    # across 113 events. Where there are enough observations to tell signal from
+    # noise (3+) and the largest is more than OUTLIER_RATIO times the average,
+    # take the largest observation that is NOT an outlier instead. Venues with
+    # one or two observations are left alone: there is nothing to compare against.
+    conn.execute("ALTER TABLE tmp_venues ADD COLUMN cap_trimmed INTEGER")
+    conn.execute("ALTER TABLE tmp_venues ADD COLUMN cap_rejected INTEGER")
+    conn.execute("UPDATE tmp_venues SET cap_trimmed = cap_max")
+    conn.execute(f"""
+        UPDATE tmp_venues SET
+            cap_rejected = cap_max,
+            cap_trimmed  = (SELECT MAX(e.pollstar_capacity) FROM events e
+                            WHERE e.venue_uid = tmp_venues.venue_uid
+                              AND e.pollstar_capacity <= {OUTLIER_RATIO} * tmp_venues.cap_typical)
+        WHERE cap_samples >= {OUTLIER_MIN_SAMPLES}
+          AND cap_typical > 0
+          AND cap_max > {OUTLIER_RATIO} * cap_typical""")
+    conn.commit()
+    trimmed = scalar(conn, "SELECT COUNT(*) FROM tmp_venues WHERE cap_rejected IS NOT NULL") or 0
+    if trimmed:
+        log(f"   {trimmed:,} venues had an outlying capacity observation "
+            f"(> {OUTLIER_RATIO}x their average over {OUTLIER_MIN_SAMPLES}+ shows); "
+            f"using the largest non-outlier instead, original kept in capacity_rejected")
+
     n = scalar(conn, "SELECT COUNT(*) FROM tmp_venues") or 0
     keys = scalar(conn, "SELECT COUNT(DISTINCT venue_key) FROM events") or 0
     merged = scalar(conn, "SELECT COUNT(*) FROM tmp_venues WHERE n_keys > 1") or 0
@@ -1632,34 +1694,49 @@ def cmd_build_venues(args, conn):
     conn.executescript(SCHEMA)
     conn.execute("""
         INSERT INTO venues (venue_uid, venue, venue_norm, city, city_norm, country,
-            countryCode, latitude, longitude, n_keys, events, first_event,
+            countryCode, latitude, longitude, coords_source, n_keys, events, first_event,
             last_event, arena_id, pollstar_venue_id, capacity, capacity_source,
             capacity_observed_max, capacity_observed_typical, capacity_samples,
-            venue_type, venue_type_source, outside_inside, outside_inside_source,
-            needs_review, updated_at)
+            capacity_rejected, venue_type, venue_type_source, outside_inside,
+            outside_inside_source, needs_review, updated_at)
         SELECT t.venue_uid, t.venue, t.venue_norm, t.city, t.city_norm, t.country,
-               t.countryCode, t.latitude, t.longitude, t.n_keys, t.events,
+               t.countryCode,
+               COALESCE(en.latitude,  t.latitude),
+               COALESCE(en.longitude, t.longitude),
+               CASE WHEN en.latitude IS NOT NULL THEN 'wikidata' ELSE 'events' END,
+               t.n_keys, t.events,
                t.first_event, t.last_event, t.arena_id, t.pollstar_venue_id,
-               COALESCE(NULLIF(a.concert_capacity, 0), t.cap_max),
+               -- the curated sheet wins, then a looked-up figure, then what
+               -- Pollstar actually reported at the door
+               COALESCE(NULLIF(a.concert_capacity, 0), en.capacity, t.cap_trimmed),
                CASE WHEN NULLIF(a.concert_capacity, 0) IS NOT NULL THEN 'dashboard'
-                    WHEN t.cap_max IS NOT NULL THEN 'pollstar'
+                    WHEN en.capacity IS NOT NULL THEN 'wikidata'
+                    WHEN t.cap_rejected IS NOT NULL THEN 'pollstar (outlier trimmed)'
+                    WHEN t.cap_trimmed IS NOT NULL THEN 'pollstar'
                     ELSE NULL END,
-               t.cap_max, t.cap_typical, COALESCE(t.cap_samples, 0),
-               COALESCE(NULLIF(a.arena_type, ''), NULLIF(t.ps_type, '')),
+               t.cap_max, t.cap_typical, COALESCE(t.cap_samples, 0), t.cap_rejected,
+               COALESCE(NULLIF(a.arena_type, ''), NULLIF(t.ps_type, ''), en.venue_type),
                CASE WHEN NULLIF(a.arena_type, '') IS NOT NULL THEN 'dashboard'
                     WHEN NULLIF(t.ps_type, '') IS NOT NULL THEN 'pollstar'
+                    WHEN en.venue_type IS NOT NULL THEN 'wikidata'
                     ELSE NULL END,
                CASE WHEN NULLIF(a.outside_inside, '') IS NOT NULL THEN a.outside_inside
                     WHEN LOWER(COALESCE(t.ps_type,'')) IN ('amphitheater','amphitheatre','fairground','festival site','outdoor venues','race track','racetrack','stadium') THEN 'Outside'
                     WHEN LOWER(COALESCE(t.ps_type,'')) IN ('arena','auditorium / theatre','ballroom','casino','club','convention center','theater','theatre')  THEN 'Inside'
+                    WHEN en.outside_inside IS NOT NULL THEN en.outside_inside
                     ELSE NULL END,
                CASE WHEN NULLIF(a.outside_inside, '') IS NOT NULL THEN 'dashboard'
                     WHEN LOWER(COALESCE(t.ps_type,'')) IN ('amphitheater','amphitheatre','arena','auditorium / theatre','ballroom','casino','club','convention center','fairground','festival site','outdoor venues','race track','racetrack','stadium','theater','theatre')
                          THEN 'inferred from venue type'
+                    WHEN en.outside_inside IS NOT NULL THEN 'wikidata'
                     ELSE NULL END,
                0, ?
         FROM tmp_venues t
-        LEFT JOIN arenas a ON a.arena_id = t.arena_id""", (now,))
+        LEFT JOIN arenas a ON a.arena_id = t.arena_id
+        LEFT JOIN ref_venue_enrichment en
+               ON en.venue_uid = t.venue_uid
+              AND en.status = 'matched'
+              AND en.confidence = 'High'""", (now,))
     conn.commit()
 
     # keep a note of which raw keys merged into each building
@@ -1670,11 +1747,28 @@ def cmd_build_venues(args, conn):
         WHERE n_keys > 1""")
     conn.commit()
 
-    conn.execute("""UPDATE venues SET needs_review = 1
+    conn.execute("""UPDATE venues SET needs_review = 1, review_reason =
+                        CASE WHEN capacity IS NULL AND outside_inside IS NULL
+                                  THEN 'no capacity, no indoor/outdoor'
+                             WHEN capacity IS NULL THEN 'no capacity'
+                             ELSE 'no indoor/outdoor' END
                     WHERE events >= ?
                       AND (capacity IS NULL OR outside_inside IS NULL)""",
                  (args.review_min_events,))
+    # a capacity that contradicts the venue type survived the trim: too big to
+    # be the room it is described as, and not an open field either
+    conn.execute("""UPDATE venues SET needs_review = 1,
+                        review_reason = COALESCE(review_reason || '; ', '')
+                                        || 'capacity implausible for venue type'
+                    WHERE capacity > 100000
+                      AND COALESCE(venue_type,'') NOT IN
+                          ('Stadium', 'Outdoor Venues', 'Untyped Venue', '')""")
     conn.commit()
+    odd = scalar(conn, "SELECT COUNT(*) FROM venues WHERE review_reason LIKE "
+                       "'%implausible%'") or 0
+    if odd:
+        log(f"   {odd:,} venues still hold a capacity that contradicts their type "
+            f"- flagged for review, not overwritten (we do not know the true figure)")
 
     # push the assembled facts back onto events so queries need no join
     log("   attaching venue facts to events ...")
@@ -1697,6 +1791,13 @@ def _venue_summary(conn, review_min=None):
     m = scalar(conn, "SELECT COUNT(*) FROM venues WHERE n_keys > 1") or 0
     if m:
         log(f"   {m:,} buildings were merged from more than one raw venue key")
+    have_en = scalar(conn, "SELECT COUNT(*) FROM ref_venue_enrichment "
+                           "WHERE status='matched' AND confidence='High'") or 0
+    if have_en:
+        used = scalar(conn, "SELECT COUNT(*) FROM venues WHERE capacity_source='wikidata'") or 0
+        coords = scalar(conn, "SELECT COUNT(*) FROM venues WHERE coords_source='wikidata'") or 0
+        log(f"   enrichment: {have_en:,} high-confidence lookups on file; "
+            f"{used:,} supplied a capacity, {coords:,} a real coordinate")
     log("   capacity provenance:")
     for src, c in conn.execute("""SELECT COALESCE(capacity_source,'(none)'), COUNT(*)
                                   FROM venues GROUP BY 1 ORDER BY 2 DESC"""):
