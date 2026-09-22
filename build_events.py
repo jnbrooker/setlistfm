@@ -1840,12 +1840,24 @@ def _integrity(conn):
         log(f"!! integrity: events account for {got:,} setlist rows but there "
             f"are {src:,} ({src - got:+,})")
 
+    # One headliner at one venue on one date is one setlist event. It is NOT
+    # one Pollstar row: a circus or a family show plays several performances a
+    # day and each is reported separately, so those are counted and reported
+    # rather than flagged.
     dupes = scalar(conn, """SELECT COUNT(*) FROM (
                                 SELECT headliner_key, date_iso, venue_key
-                                FROM events GROUP BY 1,2,3 HAVING COUNT(*)>1)""") or 0
+                                FROM events WHERE COALESCE(source,'setlistfm') = 'setlistfm'
+                                GROUP BY 1,2,3 HAVING COUNT(*)>1)""") or 0
     if dupes:
         ok = False
         log(f"!! {dupes:,} duplicate headliner/date/venue combinations")
+    runs = scalar(conn, """SELECT COUNT(*) FROM (
+                               SELECT headliner_key, date_iso, venue_key
+                               FROM events WHERE source IN ('pollstar','fixture')
+                               GROUP BY 1,2,3 HAVING COUNT(*)>1)""") or 0
+    if runs:
+        log(f"   note: {runs:,} same-day multi-performance runs (circuses, family "
+            f"shows); each performance is its own Pollstar row, so this is expected")
 
     orphan = scalar(conn, "SELECT COUNT(*) FROM events "
                           "WHERE TRIM(COALESCE(category,''))=''") or 0
