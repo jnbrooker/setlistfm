@@ -211,6 +211,29 @@ CREATE TABLE IF NOT EXISTS arena_aliases (
 CREATE INDEX IF NOT EXISTS ix_arena_alias ON arena_aliases(alias_norm);
 CREATE INDEX IF NOT EXISTS ix_arena_alias_id ON arena_aliases(arena_id);
 
+-- Every spelling of a venue that means the same BUILDING, so `venues` holds one
+-- row per room rather than one per name. Without it AO Arena, Manchester Arena
+-- and MEN Arena are three rows with a decade of history split between them.
+--
+-- THE KEY INCLUDES THE CITY, AND THAT IS THE WHOLE SAFETY MODEL. An alias can
+-- only ever apply inside the city and country it was recorded for, which makes
+-- it structurally impossible to repeat the arena_aliases bug where one
+-- `festhalle` entry reached fifty-two towns in four countries. Two names in
+-- different cities are different buildings, always, with no exception.
+CREATE TABLE IF NOT EXISTS venue_aliases (
+    alias_norm     TEXT NOT NULL,   -- the spelling being folded away
+    city_norm      TEXT NOT NULL,
+    countryCode    TEXT NOT NULL,
+    canonical_norm TEXT NOT NULL,   -- the spelling that survives
+    canonical      TEXT,            -- readable form of the survivor
+    source         TEXT,            -- dedup | manual
+    note           TEXT,            -- why, so a later reader can disagree
+    loaded_at      TEXT,
+    PRIMARY KEY (alias_norm, city_norm, countryCode)
+);
+CREATE INDEX IF NOT EXISTS ix_venue_alias_canon
+    ON venue_aliases(canonical_norm, city_norm, countryCode);
+
 -- Every venue we have ever seen an event at, with the best capacity / type /
 -- indoor-outdoor we can assemble for it, and WHERE each of those came from.
 --
@@ -231,6 +254,11 @@ CREATE TABLE IF NOT EXISTS venues (
     longitude            TEXT,
     venue_keys           TEXT,               -- the raw event keys that merged here
     n_keys               INTEGER,            -- how many identities this building had
+    n_names              INTEGER,            -- distinct spellings folded in here
+    aliases              TEXT,               -- every spelling this building has
+                                             -- traded under, so a merge is
+                                             -- always visible rather than taken
+                                             -- on trust
     events               INTEGER,
     first_event          TEXT,
     last_event           TEXT,
@@ -595,6 +623,190 @@ def _load_fx(wb, conn, now):
     log(f"   ref_fx_rates: {len(rows):,} currencies")
 
 
+def load_venue_aliases(conn, path, source="dedup"):
+    """
+    Read reviewed merge decisions into venue_aliases.
+
+    Takes the workbook venue_model/venue_dedup.py produces, and honours the
+    `should_merge` column -- so overruling any individual verdict is a matter of
+    editing one cell and re-running this, not of arguing with the code.
+
+    Only rows marked to merge are loaded. The rows deliberately NOT merged stay
+    in the workbook as a record of what was rejected and why, which is worth as
+    much as the list of what was accepted: it is what stops the same false
+    candidate being re-proposed and re-argued every time this is run.
+    """
+    import pandas as pd
+
+    # The workbook is written with the date in its name, so accept either an
+    # exact path or the newest one in that directory. Making the caller paste a
+    # dated filename is how a stale file gets loaded six months later.
+    if not os.path.exists(path):
+        import glob
+        pattern = os.path.join(os.path.dirname(path), "venue_dedup_*.xlsx")
+        hits = sorted(glob.glob(pattern))
+        if not hits:
+            raise SystemExit(
+                f"No dedup workbook at {path} or matching {pattern}. "
+                f"Produce one with `python venue_model/venue_dedup.py`.")
+        path = hits[-1]
+        log(f"   using the newest workbook: {os.path.basename(path)}")
+    d = pd.read_excel(path, sheet_name="All candidates")
+    need = {"keep_norm", "fold_norm", "city", "countryCode",
+            "should_merge", "keep", "verdict"}
+    missing = need - set(d.columns)
+    if missing:
+        raise SystemExit(f"{path} is missing columns: {sorted(missing)}")
+
+    d = d[d["should_merge"].fillna(False).astype(bool)].copy()
+    if d.empty:
+        log("   nothing marked to merge - venue_aliases left unchanged")
+        return 0
+
+    # ------------------------------------------------------------------
+    # PAIRS ARE NOT ENOUGH: a building with a sponsor history has three or
+    # four names, and the workbook records them as separate pairs.
+    #
+    # Loading those pairs directly produced chains -- "tommy hilfiger at jones
+    # beach theater" folding onto "jones beach theater", which itself folds
+    # onto "nikon at jones beach theater". The venue_uid lookup is a single
+    # hop, so the first name would resolve to a spelling that no longer
+    # survives and would end up as its own building after all. Jones Beach had
+    # four names, Nottingham Arena three, White River State Park three.
+    #
+    # The fix is to treat the pairs as edges and merge whole connected
+    # components: every name in a group points DIRECTLY at one survivor. The
+    # survivor is the name carrying the most events, because that is the
+    # spelling the data actually uses.
+    # ------------------------------------------------------------------
+    parent, weight, label = {}, {}, {}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]        # path halving
+            x = parent[x]
+        return x
+
+    def add(key, events, readable):
+        if key not in parent:
+            parent[key] = key
+        # keep the heaviest name's weight and readable form against the key
+        if events >= weight.get(key, -1):
+            weight[key], label[key] = events, readable
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        # the heavier root wins, so the surviving name is the busy one
+        if weight.get(ra, 0) >= weight.get(rb, 0):
+            parent[rb] = ra
+        else:
+            parent[ra] = rb
+
+    now = utcnow()
+    self_merges = 0
+    for r in d.itertuples(index=False):
+        alias, canon = str(r.fold_norm), str(r.keep_norm)
+        if alias == canon:
+            # A name folded onto itself makes venue_uid depend on a lookup that
+            # returns what it was given: harmless, meaningless, worth counting.
+            self_merges += 1
+            continue
+        city, cc = norm_key(str(r.city)), str(r.countryCode)
+        ka, kb = (city, cc, alias), (city, cc, canon)
+        add(ka, int(getattr(r, "fold_events", 0) or 0), str(r.fold_in))
+        add(kb, int(getattr(r, "keep_events", 0) or 0), str(r.keep))
+        union(ka, kb)
+
+    rows, groups = [], {}
+    for key in parent:
+        groups.setdefault(find(key), []).append(key)
+    for root, members in groups.items():
+        _, _, canon_norm = root
+        for city, cc, alias in members:
+            if alias == canon_norm:
+                continue
+            rows.append((alias, city, cc, canon_norm, label.get(root, canon_norm),
+                         source, f"folded into {canon_norm}", now))
+    merged_groups = sum(1 for m in groups.values() if len(m) > 2)
+
+    if merged_groups:
+        log(f"   {merged_groups} building(s) had three or more names; every "
+            f"name points straight at the survivor, so nothing has to be "
+            f"resolved twice")
+    conn.execute("DELETE FROM venue_aliases WHERE source = ?", (source,))
+    conn.executemany(
+        """INSERT OR REPLACE INTO venue_aliases
+           (alias_norm, city_norm, countryCode, canonical_norm, canonical,
+            source, note, loaded_at) VALUES (?,?,?,?,?,?,?,?)""", rows)
+    conn.commit()
+
+    # A chain -- A folds into B, and B folds into C -- would leave A pointing at
+    # a name that no longer survives, because the lookup is a single hop. Rather
+    # than resolve chains silently, they are reported: a chain nearly always
+    # means two decisions that should have been one.
+    chains = list(conn.execute(
+        """SELECT a.alias_norm, a.canonical_norm, b.canonical_norm
+           FROM venue_aliases a JOIN venue_aliases b
+             ON b.alias_norm  = a.canonical_norm
+            AND b.city_norm   = a.city_norm
+            AND b.countryCode = a.countryCode"""))
+    # Should now be impossible -- components collapse to one survivor -- but
+    # asserted rather than assumed, because a chain fails silently: the row
+    # loads, the lookup resolves to a dead name, and the building quietly
+    # splits in two again.
+    if chains:
+        log(f"   !! {len(chains)} alias chain(s) survived component merging, "
+            f"which should not be possible. These will NOT resolve correctly:")
+        for a, b, c in chains[:10]:
+            log(f"        {a} -> {b} -> {c}")
+    else:
+        log("   no alias chains: every folded name reaches its survivor in "
+            "one hop")
+
+    log(f"   {len(rows):,} venue aliases loaded from {os.path.basename(path)}"
+        + (f" ({self_merges} self-merge rows skipped)" if self_merges else ""))
+    return len(rows)
+
+
+def remap_enrichment(conn):
+    """
+    Point enrichment rows at the surviving venue_uid after a merge.
+
+    ref_venue_enrichment is keyed on venue_uid, and a merge changes venue_uid
+    for the folded-away spelling. On the current data this moves nothing -- all
+    886 enrichment rows already sit on a surviving name -- but enrichment is
+    still running, and the day it reaches a venue that later merges, silently
+    orphaning a Wikidata lookup would be an expensive way to find that out.
+    """
+    moved = conn.execute("""
+        UPDATE ref_venue_enrichment SET venue_uid = (
+            SELECT va.canonical_norm || '|' || va.city_norm || '|' || va.countryCode
+            FROM venue_aliases va
+            WHERE va.alias_norm || '|' || va.city_norm || '|' || va.countryCode
+                  = ref_venue_enrichment.venue_uid)
+        WHERE EXISTS (
+            SELECT 1 FROM venue_aliases va
+            WHERE va.alias_norm || '|' || va.city_norm || '|' || va.countryCode
+                  = ref_venue_enrichment.venue_uid)""").rowcount
+    conn.commit()
+    if moved:
+        log(f"   {moved} enrichment row(s) repointed at the surviving venue")
+    return moved
+
+
+def cmd_load_venue_aliases(args, conn):
+    conn.executescript(SCHEMA)
+    ensure_columns(conn)
+    log("== loading venue aliases ==")
+    load_venue_aliases(conn, args.path)
+    remap_enrichment(conn)
+    n = scalar(conn, "SELECT COUNT(*) FROM venue_aliases") or 0
+    log(f"   venue_aliases now holds {n:,} rows; run `build-venues` (or the "
+        f"pipeline) to apply them")
+
+
 def cmd_load_arenas(args, conn):
     """
     Load the dashboard's Arena Data tab into `arenas`, then build the venue
@@ -718,7 +930,9 @@ def build_arena_aliases(conn):
                                GROUP BY 1 ORDER BY 2 DESC"""))
     if amb:
         log(f"   {len(amb)} spelling(s) name more than one arena; these are matched "
-            f"by city, then country, and skipped if neither agrees:")
+            f"by city, then country, and skipped if neither agrees.")
+        log("   (a spelling that names ONE arena but occurs in many cities is "
+            "flagged separately at resolve time -- see flag_generic_aliases)")
         for alias_norm, n, who in amb:
             log(f"      {alias_norm}  ->  {who}")
     total = scalar(conn, "SELECT COUNT(*) FROM arena_aliases") or 0
@@ -1297,7 +1511,9 @@ def ensure_columns(conn):
     wanted = {
         "events": POLLSTAR_COLUMNS,
         "pollstar_events": [("arena_id", "TEXT")],
-        "arena_aliases": [("ambiguous", "INTEGER DEFAULT 0")],
+        "arena_aliases": [("ambiguous", "INTEGER DEFAULT 0"),
+                          ("generic", "INTEGER DEFAULT 0"),
+                          ("n_cities", "INTEGER")],
     }
     for table, cols in wanted.items():
         have = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
@@ -1327,11 +1543,88 @@ WHERE TRIM(COALESCE(venue_id,'')) <> ''
 # than one arena has to agree on city, then country, and is left unmatched when
 # neither does. Written as separate statements because a correlated reference
 # to the outer table is only legal in a subquery's WHERE, not its ORDER BY.
+# How many distinct cities a spelling has to appear in before it is treated as
+# a generic word rather than the name of a building. Three is deliberately low:
+# a real venue name occurring in three separate cities is almost always a
+# coincidence of language, not a chain.
+GENERIC_CITY_THRESHOLD = 3
+
+
 _ALIAS_PASSES = [
-    ("unambiguous name", "al.ambiguous = 0", ""),
-    ("ambiguous, city agrees", "al.ambiguous = 1", " AND al.city_norm = {t}.city_norm"),
-    ("ambiguous, country agrees", "al.ambiguous = 1", " AND al.country = {t}.country"),
+    # A name is only matched WITHOUT a geographic check when it is both
+    # unambiguous in the arenas reference AND not a generic word in the events
+    # data. Requiring both is the whole of the fix described below.
+    ("specific name", "al.ambiguous = 0 AND COALESCE(al.generic,0) = 0", ""),
+    # "City agrees" allows one spelling to extend the other at a WORD BOUNDARY,
+    # because the two sources do not name cities the same way: the arenas sheet
+    # records Frankfurt's Festhalle under "frankfurt am main" while every event
+    # says "frankfurt". With a bare equality that arena lost its 799 events --
+    # the generic rule correctly stopped Bad Urach and Konken matching, and
+    # then stopped Frankfurt matching too.
+    #
+    # The boundary matters. "york" does not extend "new york" and "new york"
+    # does not extend "york", so the pair that would be dangerous cannot join;
+    # across every generic alias in the database this rule adds exactly one
+    # pairing, the Frankfurt one it was written for.
+    ("ambiguous or generic, city agrees",
+     "(al.ambiguous = 1 OR COALESCE(al.generic,0) = 1)",
+     " AND (al.city_norm = {t}.city_norm"
+     "      OR al.city_norm LIKE {t}.city_norm || ' %'"
+     "      OR {t}.city_norm LIKE al.city_norm || ' %')"),
+    # Country is allowed as a fallback ONLY for a name that is ambiguous but
+    # not generic. For a generic word the country test is worthless: Bad Urach
+    # and Frankfurt are both in Germany, and letting country stand in for city
+    # is exactly how a village hall inherited an arena's capacity.
+    ("ambiguous but specific, country agrees",
+     "al.ambiguous = 1 AND COALESCE(al.generic,0) = 0",
+     " AND al.country = {t}.country"),
 ]
+
+
+def flag_generic_aliases(conn, threshold=GENERIC_CITY_THRESHOLD):
+    """
+    Mark spellings that name a kind of building rather than a building.
+
+    THE BUG THIS FIXES
+
+    `ambiguous` asks whether a spelling maps to more than one arena IN THE
+    ARENAS REFERENCE. That is the wrong question, and it fails in the most
+    damaging possible direction: a generic word appearing exactly once in a
+    reference of 676 arenas scores ambiguous = 0, which sends it down the pass
+    that applies it with no geographic check at all.
+
+    `festhalle` is one arena in the reference and fifty-two cities in four
+    countries in the events data. So every Festhalle in Europe was given the
+    arena_id of Festhalle Messe Frankfurt, and through ATTACH_ARENA its 15,000
+    capacity. Village halls in Konken, Bad Urach and Zaisersweiher were all
+    recorded as holding fifteen thousand people, and so was a venue in
+    Takamatsu, Japan. `stadthalle` is worse: 264 cities.
+
+    The correct question is how many distinct cities the spelling actually
+    occurs in, which only the events table can answer -- which is why this runs
+    at resolve time rather than when the aliases are built, since `load-arenas`
+    can run before there are any events to count.
+    """
+    log("   flagging generic alias spellings ...")
+    conn.execute("UPDATE arena_aliases SET generic = 0, n_cities = NULL")
+    conn.execute("""
+        UPDATE arena_aliases SET n_cities = (
+            SELECT COUNT(DISTINCT e.city_norm) FROM events e
+            WHERE e.venue_norm = arena_aliases.alias_norm)""")
+    conn.execute("UPDATE arena_aliases SET generic = (COALESCE(n_cities,0) >= ?)",
+                 (threshold,))
+    conn.commit()
+
+    rows = list(conn.execute(
+        """SELECT alias_norm, MAX(n_cities) FROM arena_aliases
+           WHERE generic = 1 GROUP BY 1 ORDER BY 2 DESC LIMIT 12"""))
+    n = scalar(conn, "SELECT COUNT(*) FROM arena_aliases WHERE generic = 1") or 0
+    if n:
+        log(f"      {n:,} spelling(s) appear in {threshold}+ cities and will "
+            f"now be matched only where the CITY agrees:")
+        for alias_norm, cities in rows:
+            log(f"         {alias_norm:34s} {cities:>4} cities")
+    return n
 
 
 ATTACH_ARENA = """
@@ -1393,6 +1686,7 @@ def resolve_arenas(conn):
         log("   !! arenas is empty - run `load-arenas` first. Falling back to "
             "venue-name matching only.")
         return False
+    flag_generic_aliases(conn)
     conn.execute("UPDATE pollstar_events SET arena_id = NULL")
     conn.execute(RESOLVE_PS_ARENA)
     by_id = scalar(conn, "SELECT COUNT(*) FROM pollstar_events "
@@ -1623,12 +1917,30 @@ def cmd_build_venues(args, conn):
     # the canonical building id, written back onto events so nothing needs to
     # recompute it later
     log("   assigning canonical venue ids ...")
+    # venue_aliases folds a renamed building onto one id. The lookup is keyed on
+    # city and country as well as the spelling, so an alias can never reach
+    # beyond the city it was recorded for.
     conn.execute("""
         UPDATE events SET venue_uid =
             CASE WHEN COALESCE(venue_norm,'') = '' THEN venue_key
-                 ELSE venue_norm || '|' || COALESCE(city_norm,'')
-                                 || '|' || COALESCE(countryCode,'')
+                 ELSE COALESCE(
+                        (SELECT va.canonical_norm FROM venue_aliases va
+                          WHERE va.alias_norm  = events.venue_norm
+                            AND va.city_norm   = COALESCE(events.city_norm,'')
+                            AND va.countryCode = COALESCE(events.countryCode,'')),
+                        events.venue_norm)
+                      || '|' || COALESCE(city_norm,'')
+                      || '|' || COALESCE(countryCode,'')
             END""")
+    folded = scalar(conn, """
+        SELECT COUNT(*) FROM events e JOIN venue_aliases va
+          ON va.alias_norm  = e.venue_norm
+         AND va.city_norm   = COALESCE(e.city_norm,'')
+         AND va.countryCode = COALESCE(e.countryCode,'')""") or 0
+    if folded:
+        n_alias = scalar(conn, "SELECT COUNT(*) FROM venue_aliases") or 0
+        log(f"      {folded:,} events folded onto a renamed building "
+            f"(from {n_alias:,} venue aliases)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_events_vuid ON events(venue_uid)")
     conn.commit()
 
@@ -1645,6 +1957,8 @@ def cmd_build_venues(args, conn):
                MAX(latitude)    AS latitude,
                MAX(longitude)   AS longitude,
                COUNT(DISTINCT venue_key) AS n_keys,
+               COUNT(DISTINCT venue)     AS n_names,
+               group_concat(DISTINCT venue) AS aliases,
                COUNT(*)         AS events,
                MIN(date_iso)    AS first_event,
                MAX(date_iso)    AS last_event,
@@ -1694,7 +2008,8 @@ def cmd_build_venues(args, conn):
     conn.executescript(SCHEMA)
     conn.execute("""
         INSERT INTO venues (venue_uid, venue, venue_norm, city, city_norm, country,
-            countryCode, latitude, longitude, coords_source, n_keys, events, first_event,
+            countryCode, latitude, longitude, coords_source, n_keys, n_names,
+            aliases, events, first_event,
             last_event, arena_id, pollstar_venue_id, capacity, capacity_source,
             capacity_observed_max, capacity_observed_typical, capacity_samples,
             capacity_rejected, venue_type, venue_type_source, outside_inside,
@@ -1704,7 +2019,7 @@ def cmd_build_venues(args, conn):
                COALESCE(en.latitude,  t.latitude),
                COALESCE(en.longitude, t.longitude),
                CASE WHEN en.latitude IS NOT NULL THEN 'wikidata' ELSE 'events' END,
-               t.n_keys, t.events,
+               t.n_keys, t.n_names, t.aliases, t.events,
                t.first_event, t.last_event, t.arena_id, t.pollstar_venue_id,
                -- the curated sheet wins, then a looked-up figure, then what
                -- Pollstar actually reported at the door
@@ -2034,6 +2349,15 @@ def main():
     la.add_argument("--workbook", default=ARENA_WORKBOOK)
     la.add_argument("--sheet", default=ARENA_SHEET)
     la.set_defaults(func=cmd_load_arenas)
+
+    lva = sub.add_parser(
+        "load-venue-aliases",
+        help="Load reviewed venue merges so one building is one row.")
+    lva.add_argument("--path", default=os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "venue_model", "reports", "venue_dedup.xlsx"),
+        help="the workbook from venue_model/venue_dedup.py")
+    lva.set_defaults(func=cmd_load_venue_aliases)
 
     lp = sub.add_parser("load-pollstar",
                         help="Load pollstar-data.xlsx into the pollstar_events table.")

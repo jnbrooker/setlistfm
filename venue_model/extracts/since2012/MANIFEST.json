@@ -1,0 +1,64 @@
+{
+  "tag": "since2012",
+  "built_at": "2026-09-23T16:33:44",
+  "since": "2012",
+  "categories": [
+    "Category A",
+    "Category B",
+    "Category C"
+  ],
+  "countries": [
+    "DE",
+    "GB",
+    "FR",
+    "IT",
+    "ES",
+    "PT",
+    "CH"
+  ],
+  "radii_km": [
+    10,
+    30,
+    60,
+    90,
+    120
+  ],
+  "min_city_events": 5,
+  "market_radius_km": 15,
+  "rows": {
+    "markets": 1192,
+    "cities": 1865,
+    "market_members": 673,
+    "venues": 19061,
+    "tours": 10719,
+    "tour_city": 82203
+  },
+  "event_date_range": [
+    "2012-01-01",
+    "2026-09-21"
+  ],
+  "sources": {
+    "events": {
+      "path": "C:\\setlistfm\\setlistfm.db",
+      "bytes": 7877558272,
+      "modified": "2026-09-23T16:19:33"
+    },
+    "demographics": {
+      "path": "C:\\database-creation\\demographicdata.db",
+      "bytes": 947843072,
+      "modified": "2026-09-17T11:25:00"
+    }
+  },
+  "caveats": [
+    "Exclusive catchment assigns each postcode to its single nearest market that hosts shows (Voronoi). It understates big cities and overstates small ones slightly, because people do travel past a small market to reach a large one; the radius figures are kept alongside so both readings are available.",
+    "Straight-line radius, not drive time: coastal and mountain cities are understated.",
+    "A postcode district counts fully in or fully out, by its centroid.",
+    "Catchments stop at national borders, so cross-border cities are understated.",
+    "Demographics cover DE, GB, FR, IT, ES, PT, CH only; elsewhere the fields are null, not zero.",
+    "Artist tiers included: Category A, Category B, Category C.",
+    "Shows on or after 2012.",
+    "Counts are shows, not attendance.",
+    "Cities within 15 km of a bigger neighbour are merged into it as one market (Assago into Milan, Casalecchio di Reno into Bologna). Every merge is listed in the market_members table.",
+    "This extract is a snapshot; the source database changes continuously."
+  ]
+}

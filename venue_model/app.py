@@ -8,6 +8,8 @@ The first screen answers the question the rest of the project exists to serve:
 given a market's demographics and the rooms it has, is it getting more or fewer
 touring acts than it should? Everything else follows from that.
 
+  Chances             the probability a tour picks this city, what moves it,
+                      and what a new room would do to it
   Tours vs expected   every market, actual against predicted, and why
   Market              one place in descriptive detail
   Venue               one room: what it pulls, and which tours it should and
@@ -49,6 +51,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import boxoffice as BO                                           # noqa: E402
+import probability as PR                                         # noqa: E402
 import recommend as R                                            # noqa: E402
 import renovate as RN                                            # noqa: E402
 import venue as V                                                # noqa: E402
@@ -119,6 +122,41 @@ def get_menu(folder, code):
 def get_model_card(folder):
     blob, err = whatif.fitted_model(os.path.basename(folder))
     return blob, err
+
+
+# What a proposed room is allowed to be, by kind.
+#
+# One range cannot serve both. The largest indoor room in the data is Paris La
+# Defense Arena at 45,000 and the 99th percentile is 20,000; outdoors the 95th
+# percentile is 77,280 and Wembley is 92,034. A slider capped at 30,000 —
+# which is what this had — simply could not express a stadium, so every
+# outdoor proposal was silently truncated to an arena.
+#
+# The outdoor ceiling stops at 100,000 rather than the 262,737 of Rome's Tor
+# Vergata papal site, because that is a field a million people once stood in
+# and not a venue anyone is proposing.
+CAPACITY_RANGE = {
+    "indoor":  {"min": 1_000, "max": 45_000, "step": 500,  "default": 12_000},
+    "outdoor": {"min": 2_000, "max": 100_000, "step": 1_000, "default": 30_000},
+}
+
+
+def capacity_slider(label, kind, key, suggested=None, help=None):
+    """
+    A capacity slider scaled to the kind of room being proposed.
+
+    The kind is part of the widget key on purpose. Streamlit keeps a slider's
+    value against its key, so switching from outdoor to indoor while holding a
+    60,000 value would otherwise push it outside the new range. A fresh key per
+    kind resets it to something sensible instead of erroring.
+    """
+    r = CAPACITY_RANGE.get(kind, CAPACITY_RANGE["indoor"])
+    start = suggested if suggested and np.isfinite(suggested) else r["default"]
+    start = int(min(max(start, r["min"]), r["max"]))
+    # round to the step so the slider does not start on a value it cannot return
+    start = int(round(start / r["step"]) * r["step"])
+    return st.slider(label, r["min"], r["max"], start, r["step"],
+                     key=f"{key}_{kind}", help=help)
 
 
 def money(v, unit=""):
@@ -412,10 +450,15 @@ def counterfactual_panel(menu, a, b, city, kind, capacity, compact=False):
 # Page routing
 # ---------------------------------------------------------------------------
 
-(tab_perf, tab_market, tab_venue, tab_renovate, tab_design, tab_build,
- tab_method) = st.tabs(
-    ["Tours vs expected", "Market", "Venue", "Renovate", "Design a venue",
-     "Build case", "Method & limits"])
+(tab_prob, tab_how, tab_perf, tab_market, tab_venue, tab_renovate, tab_design,
+ tab_build, tab_method) = st.tabs(
+    ["Chances", "How it works", "Tours vs expected", "Market", "Venue",
+     "Renovate", "Design a venue", "Build case", "Method & limits"])
+
+# One palette for the whole probability screen, so a colour means the same
+# thing on every chart: blue is how things are, green is what a room adds,
+# grey is context.
+NOW, AFTER, MUTED = "#2980b9", "#27ae60", "#95a5a6"
 
 
 # The box-office reference and the sell-through table, both cheap once cached.
@@ -427,6 +470,704 @@ def get_boxoffice():
 @st.cache_data(show_spinner=False)
 def get_performance(folder):
     return BO.performance_table(get_extract(folder))
+
+
+
+# ======================================================== CHANCES ========
+
+with tab_prob:
+    st.header("What are the chances a tour picks this city?")
+    st.markdown(
+        "Every other screen reports a **count**. This one reports the thing "
+        "the model actually produces — a probability, for each tour, of "
+        "choosing this city over every other city it could have played. "
+        "Counts are those probabilities added up, and the addition hides the "
+        "shape: twelve expected visits from fifteen near-certain acts is a "
+        "different market from twelve out of four hundred long shots.")
+
+    pc1, pc2, pc3 = st.columns([1, 2, 1])
+    with pc1:
+        p_code = pick_country("prob_country")
+    p_markets = (ex["markets"][ex["markets"]["countryCode"] == p_code]
+                 .sort_values("events", ascending=False))
+    with pc2:
+        p_city = st.selectbox("City", p_markets["city"].tolist(),
+                              key="prob_market")
+    with pc3:
+        p_spec = st.radio(
+            "Specification", ["A", "B"], horizontal=True, key="prob_spec",
+            help="A lets capacity keep the credit for every unobserved reason "
+                 "a city is attractive (upper bound). B hands as much of that "
+                 "credit as possible to past activity (lower bound). The "
+                 "truth is between them.")
+    p_row = p_markets[p_markets["city"] == p_city].iloc[0]
+
+    p_menu, p_err = get_menu(folder, p_code)
+    if p_err:
+        st.error(p_err)
+    else:
+        if p_menu.get("warning"):
+            st.warning(p_menu["warning"])
+        tours = PR.tours_for_city(p_menu, p_spec, p_city)
+        years = whatif.years_covered(ex)
+        # ACTUAL TOUR-VISITS, not the market's event count. p_row["events"]
+        # counts every show, and a tour playing three nights is three of them
+        # but only one visit -- so putting it beside an expected-visits figure
+        # invites a comparison that is wrong by a factor of the average run
+        # length. Milan read 1,381 against 64.9 before this was fixed.
+        actual = int(p_menu["rows"].loc[
+            whatif._target_mask(p_menu, p_city), "chosen"].sum())
+
+        # ---- 1. the headline ------------------------------------------
+        total_visits = float(tours["expected visits"].sum())
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Tours in play", f"{int(tours['in play'].sum()):,}",
+                  delta=f"of {len(tours):,} that toured {p_row['country']}",
+                  delta_color="off")
+        # Annualised, because 3.7 years is an artefact of the data window and
+        # nobody plans a building against it. The window is complete and
+        # roughly uniform -- 8.2k events in 2023, 8.3k in 2024, 9.3k in 2025
+        # and 2026 running at a comparable monthly rate -- so the division is
+        # sound rather than a guess.
+        k2.metric("Expected tour-visits a year", f"{total_visits / years:.1f}",
+                  delta=f"{total_visits:.0f} over {years:.1f} years",
+                  delta_color="off")
+        k3.metric("Best single chance", f"{tours['best occasion'].max():.0%}",
+                  delta=tours.iloc[0]["headliner"], delta_color="off")
+        # Headline per year, total as the subtitle -- the mirror of the
+        # expected metric beside it, so the two are read off directly against
+        # each other rather than one being a rate and the other a total.
+        k4.metric("Tour-visits it actually got", f"{actual / years:.1f}",
+                  delta=f"{actual:,} over {years:.1f} years",
+                  delta_color="off")
+        explain(
+            f"A **tour-visit** is one tour choosing this city, however many "
+            f"nights it then plays — so it is not the same as the "
+            f"{int(p_row['events']):,} shows the city hosted. Expected and "
+            f"actual above are both visits, and both annualised.")
+        explain(
+            "**Per-act figures below are not annualised** — they "
+            "stay as a chance rather than a rate, because a stadium act tours "
+            "every three years, so \"0.3 visits a year\" would read as a third "
+            "of a show annually when it means one show every three years.")
+
+        st.markdown("#### How those chances are made up")
+        shape = PR.probability_shape(tours)
+        # Per year, to match the headline metric. The share column is a ratio
+        # so it is unaffected by the division.
+        shape["a year"] = (shape["expected visits"] / years).round(2)
+        order = shape["likelihood"].tolist()
+        cshape = alt.Chart(shape).mark_bar().encode(
+            x=alt.X("a year:Q", title="expected tour-visits a year"),
+            y=alt.Y("likelihood:N", sort=order, title=None),
+            color=alt.Color("likelihood:N", sort=order, legend=None,
+                            scale=alt.Scale(range=["#1a5276", "#2980b9",
+                                                   "#7fb3d5", "#bdc3c7",
+                                                   "#ecf0f1"])),
+            tooltip=[alt.Tooltip("likelihood:N"),
+                     alt.Tooltip("tours:Q", title="tours"),
+                     alt.Tooltip("a year:Q", title="visits a year",
+                                 format=".2f"),
+                     alt.Tooltip("expected visits:Q",
+                                 title="over the whole period", format=".2f"),
+                     alt.Tooltip("share of expected visits:Q", format=".1%")],
+        ).properties(height=190)
+        st.altair_chart(cshape, use_container_width=True)
+        explain(
+            "Read the top band first. A city whose expected visits come mostly "
+            "from acts with a better-than-even chance has a settled touring "
+            "market; one whose visits come from thousands of long shots is "
+            "relying on luck, and a new room changes a lottery rather than a "
+            "schedule.")
+
+        with st.expander("Every tour, with its chance of coming here"):
+            st.dataframe(
+                tours[["headliner", "category", "act_plays", "room_needed",
+                       "best occasion", "expected visits", "occasions"]].head(300),
+                width="stretch", hide_index=True,
+                column_config={
+                    "room_needed": st.column_config.NumberColumn(
+                        "room it plays elsewhere", format="%d"),
+                    "best occasion": st.column_config.ProgressColumn(
+                        "chance of this city", format="%.3f",
+                        min_value=0.0, max_value=1.0),
+                    "expected visits": st.column_config.NumberColumn(
+                        "expected visits", format="%.3f",
+                        help="Summed over the tour's choice occasions, so an "
+                             "act touring the country twice can exceed 1.")})
+
+        # ---- 2. what drives it ----------------------------------------
+        st.divider()
+        st.markdown("#### What is driving those chances")
+        drv = PR.drivers(p_menu, p_spec, p_city)
+        drv = drv[drv["utility"].abs() > 1e-9]
+        cdrv = alt.Chart(drv).mark_bar().encode(
+            x=alt.X("utility:Q", title="effect on log-odds against a typical rival city"),
+            y=alt.Y("variable:N", sort="-x", title=None),
+            color=alt.condition(alt.datum.utility > 0, alt.value(NOW),
+                                alt.value("#c0392b")),
+            tooltip=[alt.Tooltip("variable:N"),
+                     alt.Tooltip("this market:Q", format=".3f"),
+                     alt.Tooltip("average rival:Q", format=".3f"),
+                     alt.Tooltip("coefficient:Q", format=".3f"),
+                     alt.Tooltip("utility:Q", format=".3f"),
+                     alt.Tooltip("odds x:Q", title="multiplies the odds by",
+                                 format=".2f"),
+                     alt.Tooltip("what it is:N")],
+        ).properties(height=max(200, 34 * len(drv)))
+        st.altair_chart(cdrv, use_container_width=True)
+        explain(
+            "Each bar is **(this city's value minus the average rival's) x the "
+            "coefficient**. Hover for both values and the arithmetic. The bars "
+            "add up in log-odds, which is why they do not add up in "
+            "probability: a softmax has to take from somewhere, so one city "
+            "can only gain what the others lose.")
+        with st.expander("The same thing as a table"):
+            st.dataframe(drv, width="stretch", hide_index=True,
+                         column_config={"what it is":
+                                        st.column_config.TextColumn(
+                                            "what it is", width="large")})
+
+        # ---- 3. what the existing rooms contribute --------------------
+        st.divider()
+        st.markdown("#### How much of that comes from the rooms it has")
+        p_lad = V.rooms(ex, p_row)
+        if p_lad.empty:
+            st.info("No room here has a recorded capacity.")
+        else:
+            pulls = []
+            for vn in p_lad["venue"].head(12):
+                try:
+                    pu = V.market_pull(p_menu, p_spec, ex, p_row, vn, p_lad)
+                except (KeyError, ValueError):
+                    continue
+                cap = float(p_lad.loc[p_lad["venue"] == vn, "capacity"].iloc[0])
+                pulls.append({"venue": vn, "capacity": cap,
+                              "pull": round(pu["pull"], 3),
+                              "binding": pu["binding"]})
+            pull_df = pd.DataFrame(pulls)
+            cpull = alt.Chart(pull_df).mark_bar().encode(
+                x=alt.X("pull:Q", title="expected visits the city would lose "
+                                        "without this room"),
+                y=alt.Y("venue:N", sort="-x", title=None),
+                color=alt.condition(alt.datum.pull > 0, alt.value(NOW),
+                                    alt.value(MUTED)),
+                tooltip=["venue", alt.Tooltip("capacity:Q", format=","),
+                         alt.Tooltip("pull:Q", format=".3f"),
+                         alt.Tooltip("binding:N",
+                                     title="is it the ceiling?")],
+            ).properties(height=max(180, 26 * len(pull_df)))
+            st.altair_chart(cpull, use_container_width=True)
+            explain(
+                "Grey rooms pull nothing, and that is not a criticism of them. "
+                "The model works through the **ceiling** — the biggest room of "
+                "each kind — so removing anything smaller changes no verdict. "
+                "The tours those rooms host were coming anyway and would have "
+                "played elsewhere in the city.")
+
+        # ---- 4. add a room --------------------------------------------
+        st.divider()
+        st.markdown("#### What a new room would do to those chances")
+        a1, a2 = st.columns([3, 1])
+        with a2:
+            p_kind = st.radio("Kind", ["indoor", "outdoor"], key="prob_kind")
+            cats = sorted(tours["category"].dropna().unique())
+            p_cats = st.multiselect(
+                "Artist tiers", cats, default=cats, key="prob_cats",
+                help="Filters every figure in this section. Category A acts "
+                     "are the ones a large room is built for, and looking at "
+                     "them alone is usually the honest test of an arena case.")
+            p_draws = st.slider("Simulation draws", 60, 400, 150, 20,
+                                key="prob_draws",
+                                help="Coefficient draws from the fitted "
+                                     "covariance. More draws is a smoother "
+                                     "band, not a better answer.")
+        with a1:
+            ceil_now = (p_lad.loc[p_lad["io"] == ("inside" if p_kind == "indoor"
+                                                  else "outside"), "capacity"].max()
+                        if not p_lad.empty else np.nan)
+            p_cap = capacity_slider(
+                "Capacity of the proposed room", p_kind, "prob_cap",
+                suggested=(ceil_now * 1.5
+                           if np.isfinite(ceil_now) else None),
+                help="Indoor tops out at 45,000 (Paris La Defense Arena is the "
+                     "largest in the data); outdoor reaches 100,000, which "
+                     "covers Wembley at 92,034.")
+            if np.isfinite(ceil_now):
+                st.caption(f"The biggest {p_kind} room here today holds "
+                           f"**{ceil_now:,.0f}**. A proposal below that moves "
+                           f"nothing, because the ceiling is what acts are "
+                           f"tested against.")
+
+        move_all = PR.with_new_room(p_menu, p_spec, p_city, p_cap, p_kind)
+        move = (move_all[move_all["category"].isin(p_cats)]
+                if p_cats else move_all.head(0))
+        gained = float(move["change"].sum())
+        cleared = int(move["room clears its bar"].sum())
+        if len(p_cats) < len(cats):
+            st.caption(f"Showing **{', '.join(p_cats) or 'nothing'}** only — "
+                       f"{len(move):,} of {len(move_all):,} tours.")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Expected visits a year now",
+                  f"{move['before'].sum() / years:.1f}")
+        m2.metric("With the new room", f"{move['after'].sum() / years:.1f}",
+                  delta=f"{gained / years:+.1f} a year")
+        m3.metric("Over the whole period", f"{gained:+.1f}",
+                  delta=f"{years:.1f} years", delta_color="off")
+        m4.metric("Acts the room is big enough for", f"{cleared:,}",
+                  delta=f"of {len(move):,}", delta_color="off")
+
+        # A proposal at or below the existing ceiling moves nothing, and a
+        # dumbbell chart of eighteen motionless rows is worse than saying so:
+        # it invites a reader to hunt for a difference that is not there.
+        if gained < 0.05:
+            st.info(
+                f"**A {p_cap:,}-capacity {p_kind} room changes nothing here.** "
+                + (f"The city already has a {ceil_now:,.0f}-capacity {p_kind} "
+                   f"room, and the model tests acts against the ceiling, so a "
+                   f"smaller proposal offers them nothing they cannot already "
+                   f"have. Raise the slider above {ceil_now:,.0f} to see "
+                   f"movement."
+                   if np.isfinite(ceil_now) and p_cap <= ceil_now else
+                   "No act that toured the country is held back by room size "
+                   "here."))
+            movers = move.head(0).copy()
+        else:
+            movers = move[move["change"] > 1e-6].head(18).copy()
+        movers["label"] = (movers["headliner"].astype(str).str.slice(0, 28)
+                           + "  (" + movers["room_needed"].fillna(0)
+                           .astype(int).astype(str) + ")")
+        base = alt.Chart(movers if len(movers) else
+                         pd.DataFrame({"label": [], "before": [], "after": [],
+                                       "change": [], "headliner": [],
+                                       "category": [], "room_needed": []})).encode(
+            y=alt.Y("label:N", sort="-x", title=None))
+        seg = base.mark_rule(strokeWidth=3, color=MUTED).encode(
+            x=alt.X("before:Q",
+                    title=f"expected visits from this act, over {years:.1f} years"),
+            x2="after:Q")
+        dot_b = base.mark_point(size=90, filled=True, color=NOW).encode(
+            x=alt.X("before:Q"),
+            tooltip=["headliner", "category",
+                     alt.Tooltip("room_needed:Q", title="room it plays",
+                                 format=","),
+                     alt.Tooltip("before:Q", format=".3f"),
+                     alt.Tooltip("after:Q", format=".3f"),
+                     alt.Tooltip("change:Q", format="+.3f")])
+        dot_a = base.mark_point(size=110, filled=True, color=AFTER).encode(
+            x="after:Q",
+            tooltip=["headliner", alt.Tooltip("after:Q", format=".3f"),
+                     alt.Tooltip("change:Q", format="+.3f")])
+        if len(movers):
+            st.altair_chart((seg + dot_b + dot_a).properties(
+                height=max(240, 26 * len(movers))), use_container_width=True)
+        explain(
+            f"**Per act this is a total over {years:.1f} years, not a rate** — "
+            f"deliberately. A stadium act tours every three years, so an "
+            f"annualised 0.3 would read as a third of a show a year when it "
+            f"means one show every three. Blue is today, green is with a "
+            f"{p_cap:,}-capacity {p_kind} room. "
+            f"The acts that move are the ones whose usual room is bigger than "
+            f"anything here now but fits inside the proposal — everyone else "
+            f"sits still, because the model has nothing new to offer them.")
+
+        # ---- the simulation -------------------------------------------
+        st.markdown("##### How firm is that, given the coefficients are estimates?")
+        try:
+            before_s, after_s = PR.simulate_city(
+                p_menu, p_city, p_spec, p_cap, p_kind, draws=p_draws)
+            sims = pd.concat([
+                pd.DataFrame({"a year": before_s / years, "scenario": "today"}),
+                pd.DataFrame({"a year": after_s / years,
+                              "scenario": f"with a {p_cap:,} {p_kind} room"})])
+            hist = alt.Chart(sims).mark_area(opacity=0.55, interpolate="step").encode(
+                x=alt.X("a year:Q", bin=alt.Bin(maxbins=40),
+                        title="expected tour-visits a year"),
+                y=alt.Y("count():Q", stack=None, title="draws"),
+                color=alt.Color("scenario:N",
+                                scale=alt.Scale(range=[NOW, AFTER]),
+                                legend=alt.Legend(title=None, orient="top")),
+                tooltip=["scenario", alt.Tooltip("count():Q", title="draws")],
+            ).properties(height=260).interactive()
+            st.altair_chart(hist, use_container_width=True)
+
+            d = (after_s - before_s) / years
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Median gain", f"{np.median(d):+.1f} visits a year")
+            s2.metric("5th to 95th percentile",
+                      f"{np.percentile(d, 5):+.1f} to "
+                      f"{np.percentile(d, 95):+.1f} a year")
+            s3.metric("Draws where it gains nothing",
+                      f"{(d <= 0).mean():.0%}")
+            st.warning(
+                "**This band is the narrowest uncertainty in the project, and "
+                "the least important.** It covers only how far the answer "
+                "would move if the same model were fitted to another sample of "
+                "tours. It does **not** cover whether capacity causes shows or "
+                "merely accompanies them — that is the gap between "
+                "specifications A and B, and it is far wider. Switch the "
+                "specification at the top and watch the whole chart move by "
+                "more than this band's width.")
+        except ValueError as e:
+            st.info(str(e))
+
+        # ---- what that is worth --------------------------------------
+        st.divider()
+        st.markdown("#### What those extra shows would gross")
+        ref_bo2, bo_err2 = get_boxoffice()
+        if bo_err2:
+            st.info(bo_err2)
+        elif gained < 0.05:
+            st.info("Nothing to value: the proposed room adds no shows.")
+        else:
+            perf_tbl = get_performance(folder)
+            # Use the room's own sell-through where the market has one that is
+            # measurable, so a city whose rooms historically undersell is not
+            # credited with average takings.
+            pp = 0.0
+            if not p_lad.empty:
+                top_room = p_lad.iloc[0]["venue"]
+                vp = BO.venue_performance(perf_tbl, top_room)
+                if vp:
+                    pp = vp["residual_pp"]
+                    st.caption(
+                        f"Using **{top_room}**'s sell-through as the local "
+                        f"benchmark: {vp['residual_pp']:+.1f} points against "
+                        f"par for its size ({vp['band']}).")
+
+            # The A-to-B interval, not a point: the same bracket every other
+            # model number in this app carries.
+            other = "B" if p_spec == "A" else "A"
+            move_other = PR.with_new_room(p_menu, other, p_city, p_cap, p_kind)
+            move_other = (move_other[move_other["category"].isin(p_cats)]
+                          if p_cats else move_other.head(0))
+            g_other = float(move_other["change"].sum())
+            lo_v, hi_v = min(gained, g_other), max(gained, g_other)
+
+            rev = BO.project(ref_bo2, lo_v, hi_v, p_cap,
+                             performance_pp=pp, years=years)
+            r1, r2 = st.columns(2)
+            r1.metric("Gross box office a year",
+                      f"USD {rev['per_year_low']:,.0f} to "
+                      f"{rev['per_year_high']:,.0f}")
+            r2.metric(f"Over {years:.1f} years",
+                      f"USD {rev['central_low']:,.0f} to "
+                      f"{rev['central_high']:,.0f}")
+            st.caption(
+                f"Specification A gives {max(gained, g_other) if p_spec == 'A' else min(gained, g_other):+.1f} "
+                f"extra visits and B gives the other end; the range above "
+                f"spans both, at a median gross of "
+                f"USD {rev['gross_per_event']['median']:,.0f} a show for a "
+                f"{p_cap:,}-capacity room.")
+            st.error(
+                "**Gross box office, not venue revenue.** This is what the "
+                "audience pays. The venue takes a hire fee plus a share of "
+                "ancillaries, which needs a rate card this database does not "
+                "have — `ref_hospitality` holds 32 rows. Converting this to "
+                "what a building earns is a step you have to take yourself.")
+
+            with st.expander("Where that range comes from"):
+                st.dataframe(
+                    BO.decompose(ref_bo2, lo_v, hi_v, p_cap,
+                                 performance_pp=pp),
+                    width="stretch", hide_index=True,
+                    column_config={
+                        "can more data fix it?": st.column_config.TextColumn(
+                            "can more data fix it?", width="large"),
+                        "share of the uncertainty":
+                            st.column_config.ProgressColumn(
+                                "share of the uncertainty", format="%.2f",
+                                min_value=0.0, max_value=1.0)})
+                explain(
+                    "The two sources are usually comparable in size, which is "
+                    "the useful finding: better ticket-price data would not "
+                    "narrow this much, and neither would more events. Only "
+                    "Layer 3 — a natural experiment around real venue "
+                    "openings — would.")
+
+        # ---- 5. one tour ----------------------------------------------
+        st.divider()
+        st.markdown("#### One act at a time")
+        st.markdown(
+            "The same arithmetic for a single tour: its chance of this city, "
+            "where it is more likely to go instead, and what the proposed room "
+            "would change.")
+
+        in_play = tours[tours["in play"]].copy()
+        if p_cats:
+            in_play = in_play[in_play["category"].isin(p_cats)]
+        in_play["label"] = (in_play["headliner"].astype(str) + "  —  "
+                            + in_play["category"].astype(str) + "  —  "
+                            + in_play["best occasion"].map("{:.1%}".format))
+        if in_play.empty:
+            st.info("No tour of the selected tiers is in play here.")
+        else:
+            pick = st.selectbox("Tour", in_play["label"].tolist(),
+                                key="prob_tour")
+            t_row = in_play[in_play["label"] == pick].iloc[0]
+            t_name = t_row["tour"]
+            det = PR.tour_detail(p_menu, t_name)
+            chg = PR.tour_with_new_room(p_menu, p_spec, p_city, t_name,
+                                        p_cap, p_kind)
+
+            st.markdown(f"##### {det['headliner']} — *{t_name}*")
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("Chance of this city now",
+                      f"{t_row['best occasion']:.1%}")
+            t2.metric("Room it plays elsewhere", money(det["room_needed"]),
+                      delta=f"{det['plays']} act", delta_color="off")
+            if chg:
+                t3.metric(f"With a {p_cap:,} {p_kind} room",
+                          f"{chg['best_after']:.1%}",
+                          delta=f"{chg['best_after'] - chg['best_before']:+.1%}")
+                t4.metric("Does the proposal fit it?",
+                          "yes" if chg["clears"] else "no",
+                          delta=(f"{p_cap:,} clears its {det['room_needed']:,.0f}"
+                                 if chg["clears"] and det["room_needed"]
+                                 else "still too small for this act"),
+                          delta_color="off")
+
+            # ---- where the city now sits in this act's running order ----
+            ranked = PR.cities_for_tour_change(
+                p_menu, p_spec, p_city, t_name, p_cap, p_kind, limit=16)
+            sentence = PR.rank_sentence(ranked, p_city)
+            if sentence:
+                st.markdown(sentence)
+
+            rl = ranked.melt(
+                id_vars=["market", "played", "rank before", "rank after"],
+                value_vars=["chance_before", "chance_after"],
+                var_name="when", value_name="chance")
+            rl["when"] = rl["when"].map(
+                {"chance_before": "now",
+                 "chance_after": f"with a {p_cap:,} {p_kind} room"})
+            rl["this city"] = rl["market"] == p_city
+            # Whether the act actually PLAYED a city is the most important
+            # thing on this chart and it was previously only in the tooltip.
+            # It gets three encodings now -- a black outline, a label, and the
+            # sort order -- because a reader should not have to hover to find
+            # out which bars are history and which are counterfactual.
+            order = ranked["market"].tolist()
+            rl["marker"] = np.where(rl["played"], "played", "")
+            bars = alt.Chart(rl).mark_bar(cornerRadiusEnd=2).encode(
+                x=alt.X("chance:Q", title="chance this act plays the city",
+                        axis=alt.Axis(format="%")),
+                y=alt.Y("market:N", sort=order, title=None),
+                yOffset="when:N",
+                color=alt.Color("when:N", scale=alt.Scale(range=[NOW, AFTER]),
+                                legend=alt.Legend(title=None, orient="top")),
+                stroke=alt.condition(alt.datum.played, alt.value("#2c3e50"),
+                                     alt.value(None)),
+                strokeWidth=alt.condition(alt.datum.played, alt.value(1.4),
+                                          alt.value(0)),
+                opacity=alt.condition(alt.datum["this city"], alt.value(1.0),
+                                      alt.value(0.5)),
+                tooltip=["market", "when",
+                         alt.Tooltip("chance:Q", format=".2%"),
+                         alt.Tooltip("rank before:Q", title="rank now"),
+                         alt.Tooltip("rank after:Q", title="rank after"),
+                         alt.Tooltip("played:N", title="act played here")],
+            )
+            labels = alt.Chart(
+                rl[rl["when"] == "now"]).mark_text(
+                    align="left", dx=5, fontSize=11, color="#2c3e50",
+                    fontWeight="bold").encode(
+                x=alt.X("chance:Q"),
+                y=alt.Y("market:N", sort=order),
+                text="marker:N")
+            crank = (bars + labels).properties(
+                height=max(260, 34 * len(ranked)))
+            st.altair_chart(crank, use_container_width=True)
+            st.caption(
+                "Bars with a dark outline and a **played** label are cities "
+                "this act really visited. Everything without one is a city it "
+                "passed over — those are the counterfactual numbers, and the "
+                "ones worth arguing about.")
+            explain(
+                f"Solid bars are **{p_city}**. Every other city dips slightly "
+                f"when it gains, because the alternatives share one "
+                f"denominator — the probability has to come from somewhere, "
+                f"and that is the competitive effect made visible. Cities "
+                f"marked `played` were measured on the single occasion they "
+                f"won, so their figure is conditioned on winning and reads "
+                f"high; the directly comparable numbers are the ones the act "
+                f"passed over.")
+
+            # ---- what the act actually did ------------------------------
+            st.markdown("##### What this tour actually played")
+            itin = PR.tour_itinerary(ex, t_name, p_code)
+            if itin.empty:
+                st.info("No itinerary recorded for this tour in this country.")
+            else:
+                been = set(itin["market"].dropna())
+                st.markdown(
+                    f"**{len(itin)} stops** in {p_row['country']}"
+                    + (f", and **{p_city} was not one of them**."
+                       if p_city not in been else
+                       f", including **{p_city}**."))
+                st.dataframe(
+                    itin, width="stretch", hide_index=True,
+                    column_config={
+                        "first_event": st.column_config.TextColumn("date"),
+                        "largest_capacity_played":
+                            st.column_config.NumberColumn(
+                                "room used", format="%d"),
+                        "events": st.column_config.NumberColumn(
+                            "dates", format="%d")})
+                explain(
+                    "Fact, not model output — this is where the act went. Read "
+                    "it against the chart above: a city with a high chance and "
+                    "no stop is the case worth explaining, and the model "
+                    "cannot tell you which of routing, guarantees or a "
+                    "promoter relationship accounts for it.")
+
+
+# ====================================================== HOW IT WORKS ======
+
+with tab_how:
+    st.header("What this model is actually doing")
+    st.markdown("""
+The whole project answers one question — **would a new room bring more shows to
+this city** — and it answers it in layers, because the question is causal and
+the data is observational. Each layer is more ambitious and less certain than
+the one below, and they are kept apart so you can see how far out on the limb
+any given number sits.
+""")
+
+    st.dataframe(pd.DataFrame([
+        {"layer": "1. Counting",
+         "what it does": "Capacity ladder, tours that skipped, whether room "
+                         "size was the obstacle, peer comparison.",
+         "what it licenses": "\"Here is what happens today.\"",
+         "where it is": "Market, Build case, Venue"},
+        {"layer": "2. Choice model",
+         "what it does": "A conditional logit over which cities tours picked.",
+         "what it licenses": "\"This associates with that, holding the act "
+                             "constant.\"",
+         "where it is": "Chances, Tours vs expected, Design a venue"},
+        {"layer": "3. Causal",
+         "what it does": "Difference-in-differences around real venue "
+                         "openings. NOT BUILT.",
+         "what it licenses": "\"This caused that.\"",
+         "where it is": "nowhere yet"},
+        {"layer": "4. Simulation",
+         "what it does": "Redrawing the coefficients to get a spread.",
+         "what it licenses": "\"Here is the distribution.\"",
+         "where it is": "the band on Chances"},
+    ]), width="stretch", hide_index=True,
+        column_config={"what it does": st.column_config.TextColumn(
+            "what it does", width="large")})
+
+    st.divider()
+    st.markdown("""
+#### The model in one line
+
+For each tour, and each city it could have played:
+
+$$P(\\text{this city}) = \\frac{e^{\\,x'\\beta}}{\\sum_{\\text{all cities on the menu}} e^{\\,x'\\beta}}$$
+
+That is McFadden's conditional logit. `x` is the city's attributes, `β` the
+fitted coefficients. The denominator runs over every city that tour could have
+chosen, which is what makes this a **choice** model rather than a forecast of
+each city separately: the probabilities on one menu must add to one, so a city
+can only gain by taking from the others.
+
+#### Why that form, and what it buys for free
+
+**Everything about the act cancels.** An artist's popularity, budget, genre and
+fanbase are the same for every city on their menu, so they vanish from the
+ratio. That sounds like a loss and is the model's main virtue: the coefficients
+are identified purely from **within-tour** variation. The question is not "which
+tours play big cities" but *given that this tour played four cities in Italy,
+why those four* — and every confounder attached to the artist has been
+differenced away without having to measure it.
+
+To let an artist trait matter it has to be **interacted** with a city trait.
+That is why `room big enough × log room needed` is in the model: it asks whether
+capacity binds harder for bigger acts. It does.
+
+#### What goes in
+
+""")
+    card, card_err = get_model_card(folder)
+    if card_err:
+        st.info(card_err)
+    elif card:
+        notes = card.get("variable_notes", {})
+        specA = card["specs"]["A"]
+        specB = card["specs"]["B"]
+        tbl = pd.DataFrame({
+            "variable": specA["names"],
+            "A": np.round(specA["beta"], 3),
+            "B": [dict(zip(specB["names"], np.round(specB["beta"], 3)))
+                  .get(n, np.nan) for n in specA["names"]],
+            "what it means": [notes.get(n, "") for n in specA["names"]],
+        })
+        st.dataframe(tbl, width="stretch", hide_index=True,
+                     column_config={"what it means":
+                                    st.column_config.TextColumn(
+                                        "what it means", width="large")})
+        st.caption(
+            f"Fitted on {card['n_rows']:,} rows — {card['n_occasions']:,} "
+            f"choice occasions from {card['n_tours']:,} tours across "
+            f"{', '.join(card['countries'])}. Standard errors clustered by "
+            f"tour, because one tour contributes many occasions and they are "
+            f"obviously not independent.")
+
+    st.divider()
+    st.markdown("""
+#### The problem at the centre of it, stated plainly
+
+**The question is causal and the data is observational.**
+
+Cities with big arenas get big shows. But cities that *build* big arenas are
+cities where promoters already expected demand. The arena did not cause the
+shows; anticipated demand caused both. Regress shows on capacity across cities
+and you get a large, clean, highly significant coefficient that is **mostly
+selection**.
+
+Nothing in this data fixes that. So instead of pretending otherwise, two
+specifications are fitted and **the answer is the interval between them**:
+
+- **A** — catchment, income, capacity, spread. Capacity keeps the credit for
+  every unobserved reason a city is attractive. Its coefficient is an
+  **upper bound**.
+- **B** — the same, plus how many shows the city already hosts. Past activity
+  is the best available proxy for those unobserved reasons, but it is also
+  partly *the thing capacity delivers*, so it strips out some of the real
+  effect too. A **lower bound**.
+
+The truth is inside. This data cannot say where. If the two bounds agree, a
+finding is robust to the worry; if they are far apart, no further modelling of
+the same data will settle it.
+
+**The one result that survives the harshest test:** `has a room big enough`
+holds up under specification B almost intact, while plain `log largest room`
+collapses to nothing. General size is explained away by past activity — which
+is what you would expect if it were mostly selection. Whether the room clears
+*this particular act's* bar is not.
+
+#### What would actually narrow it
+
+Layer 3: difference-in-differences around real venue openings. A venue that
+opened in 2018 gives a before and an after for the same city, which is the only
+thing in reach that separates the room causing shows from the room accompanying
+them. It does not exist yet, and it is the single most valuable thing left to
+build.
+
+#### Things the model cannot see
+
+- Everything about a building except its size and whether it has a roof.
+  Sightlines, loading bays, rail links, the promoter and the rent are invisible.
+  A better room of the same capacity scores identically.
+- A second room the same size as the existing one. The model works through the
+  **ceiling**, so it registers as nothing. Date congestion is real and unseen.
+- Which room inside a city an act picks. That needs the extra assumption on the
+  Venue tab, and it is only reliable where a market has few rooms.
+- Money, until Pollstar is brought in — and even then it is **gross box
+  office**, not what a venue earns.
+""")
 
 
 # ================================================== TOURS VS EXPECTED =====
@@ -1262,8 +2003,8 @@ with tab_design:
         ceil_now = drec["ceilings"].get(kind)
         suggested = drec.get("size_median") or (
             int(ceil_now * 2) if ceil_now and np.isfinite(ceil_now) else 10_000)
-        capacity = st.slider("Capacity", 500, 60_000,
-                             int(min(max(suggested, 500), 60_000)), 250)
+        capacity = capacity_slider("Capacity", kind, "design_cap",
+                                   suggested=suggested)
         st.caption(
             f"The blocked tours in {drow['city']} typically play "
             + (f"**{drec['size_median']:,}** seats ({drec['kind']})."

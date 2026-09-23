@@ -96,6 +96,19 @@ def fitted_model(stamp=None):
                       "recorded with it, so its coefficients cannot safely be "
                       "applied to a single country's menu. Re-run "
                       "`python layer2.py --save`.")
+    # A stamp mismatch is NOT fatal -- the coefficients still work and the app
+    # still runs -- so it goes on the blob rather than into the error slot.
+    # Callers treat a non-None error as fatal and abort, and a warning that
+    # kills the page is worse than the thing it warns about.
+    blob["warning"] = None
+    if not blob.get("stamp_matched", True):
+        blob["warning"] = (
+            f"This extract is **{blob.get('stamp_requested')}**, but the only "
+            f"fitted model available is `{blob.get('loaded_file')}`, fitted on "
+            f"the **{blob.get('extract')}** extract. The coefficients come "
+            f"from a different sample of tours than the menus they are applied "
+            f"to, and nothing downstream can detect that. Re-run "
+            f"`python layer2.py --save` against this extract.")
     return blob, None
 
 
@@ -134,7 +147,8 @@ def build_menu(ex, code, blob):
                        "names": names, "v": X @ beta, "consts": consts,
                        "pseudo_r2": saved.get("pseudo_r2")}
 
-    return {"countryCode": code, "rows": rows, "offsets": offsets, "y": y,
+    return {"countryCode": code, "warning": blob.get("warning"),
+            "rows": rows, "offsets": offsets, "y": y,
             "markets": sorted(rows["market"].unique()), "specs": specs,
             "n_tours": int(rows["tour"].nunique()),
             "n_occasions": int(len(offsets)), "consts": consts}

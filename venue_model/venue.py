@@ -71,6 +71,7 @@ import layer2                                                    # noqa: E402
 import logit                                                     # noqa: E402
 import whatif                                                    # noqa: E402
 from gap import capacity_ladder, resolve_market                  # noqa: E402
+from probability import _modal_kind                              # noqa: E402
 
 # A tour's probability of the city has to clear this before the venue is said
 # to "expect" it. Below this the act is not realistically in play, and a long
@@ -300,10 +301,11 @@ def market_pull(menu, spec, ex, market_row, venue, lad=None):
     sub = menu["rows"].loc[target].copy()
     sub["p_with"], sub["p_without"] = p_now[target], p_without[target]
     sub["pull"] = sub["p_with"] - sub["p_without"]
-    per_tour = (sub.groupby(["tour", "headliner", "category", "act_plays",
-                             "room_needed"], as_index=False)
+    per_tour = (sub.groupby(["tour", "headliner", "category"], as_index=False)
                 .agg(p_with=("p_with", "sum"), p_without=("p_without", "sum"),
-                     pull=("pull", "sum"))
+                     pull=("pull", "sum"),
+                     room_needed=("room_needed", "median"),
+                     act_plays=("act_plays", _modal_kind))
                 .sort_values("pull", ascending=False))
 
     return {"binding": True, "expected_with": expected_now,
@@ -372,9 +374,13 @@ def expectations(menu, spec, ex, market_row, venue, lad=None, min_p=MIN_P):
 
     sub = menu["rows"].loc[target].copy()
     sub["p"] = p[target]
-    per = (sub.groupby(["tour", "headliner", "category", "act_plays",
-                        "room_needed"], as_index=False)
-           .agg(p_city=("p", "sum"), occasions=("p", "size")))
+    # Grouped on the tour alone. room_needed and act_plays are leave-one-out
+    # values that vary between a tour's own occasions, so using them as keys
+    # splits one act into several rows -- see probability.TOUR_KEYS.
+    per = (sub.groupby(["tour", "headliner", "category"], as_index=False)
+           .agg(p_city=("p", "sum"), occasions=("p", "size"),
+                room_needed=("room_needed", "median"),
+                act_plays=("act_plays", _modal_kind)))
 
     need = pd.to_numeric(per["room_needed"], errors="coerce")
     kinds = per["act_plays"]

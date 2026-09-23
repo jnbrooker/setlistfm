@@ -10,6 +10,9 @@ their own and means one stage blowing up cannot corrupt another's state.
     2. categories  artist_categories.py refresh kworb pull, thresholds, A-E tiers
     3. pollstar    build_events.py load-pollstar box office  (only with --pollstar)
     4. arenas      build_events.py load-arenas   arenas + aliases (only with --arenas)
+    4. venue-aliases build_events.py load-venue-aliases
+                                                  one row per building
+                                                  (only with --venue-aliases)
     4. fixtures    build_events.py load-fixtures sport fixtures (only with --fixtures)
     5. events      build_events.py build        bills, routing, categories, Pollstar, sport
     6. export      build_events.py export       events.csv  (only with --export)
@@ -57,6 +60,11 @@ STEPS = [
     # opt-in: rebuilds the arenas table and the venue-name alias map from the
     # dashboard workbook. Only needed when that workbook's Arena Data changes.
     ("arenas", ["build_events.py", "load-arenas"], False),
+    # opt-in: reviewed venue merges, so one building is one row rather than one
+    # row per name it has traded under. Only needs re-running when the dedup
+    # workbook changes, and it must run BEFORE events, because `build` is what
+    # assigns venue_uid from the alias table.
+    ("venue-aliases", ["build_events.py", "load-venue-aliases"], False),
     # opt-in for the same reason: the sporting fixtures live in the dashboard
     # workbook's Event Data tab and only change when that file does
     ("fixtures", ["build_events.py", "load-fixtures"], False),
@@ -172,7 +180,13 @@ def one_pass(args):
                 continue
             # an opt-in stage (export) runs when its flag is set, or when the
             # user named it explicitly with --only
-            if not always and not getattr(args, name, False) and not args.only:
+            # argparse turns --venue-aliases into args.venue_aliases, so the
+            # stage name has to be normalised before the lookup. Without this
+            # a hyphenated stage is gated on an attribute that can never
+            # exist, so it silently never runs -- which is exactly what
+            # "venue-aliases" did when it was added.
+            if (not always and not args.only
+                    and not getattr(args, name.replace("-", "_"), False)):
                 continue
             # a reloaded Pollstar file is the one case the match must be redone
             extra = ["--rematch"] if name == "events" and getattr(args, "pollstar", False) else ()
@@ -292,6 +306,10 @@ def add_run_flags(p):
     p.add_argument("--arenas", action="store_true",
                    help="Also reload the Arena Data tab (arenas + venue name "
                         "aliases). Only needed when that tab has changed.")
+    p.add_argument("--venue-aliases", action="store_true",
+                   help="Load the reviewed venue merges so one building is "
+                        "one row. Needed once; the table then persists and "
+                        "every later build applies it.")
     p.add_argument("--fixtures", action="store_true",
                    help="Also reload the sporting fixtures from the dashboard "
                         "workbook's Event Data tab. Only needed when it changes.")

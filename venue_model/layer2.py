@@ -398,7 +398,16 @@ def load_model(stamp=None):
     want = f"layer2_{stamp}.json" if stamp else None
     name = want if want in files else files[-1]
     with open(os.path.join(MODEL_DIR, name), encoding="utf-8") as fh:
-        return json.load(fh)
+        blob = json.load(fh)
+    # Record whether this is actually the model for the extract that was asked
+    # for. The fallback to the newest file is convenient and dangerous: a model
+    # fitted on a 2023-onward extract applied to a 2020-onward one would pass
+    # every column check, because the variables are identical, and be wrong in
+    # a way nothing downstream could detect.
+    blob["loaded_file"] = name
+    blob["stamp_requested"] = stamp
+    blob["stamp_matched"] = bool(stamp is None or want == name)
+    return blob
 
 
 # ---------------------------------------------------------------------------
