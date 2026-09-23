@@ -1,0 +1,295 @@
+{
+  "fitted": "2026-09-23T12:21:18",
+  "extract": "2026-09-23",
+  "countries": [
+    "CH",
+    "DE",
+    "ES",
+    "FR",
+    "GB",
+    "IT",
+    "PT"
+  ],
+  "n_rows": 1153396,
+  "n_occasions": 19869,
+  "n_tours": 2540,
+  "design_constants": {
+    "income_median": 23340.0,
+    "ceiling_floor": 340.0,
+    "need_median": 3550.0,
+    "km_median": 108.66099623745176,
+    "stops_mean": 1.7848479676559097,
+    "big_mean": 1.3082978570222648
+  },
+  "variable_notes": {
+    "log catchment": "Log of the people for whom this is the nearest market hosting shows, within 60 km, in millions. A coefficient of 1 means doubling the catchment doubles the odds of being picked.",
+    "log income per head": "Log of disposable spending power per resident. Separates 'lots of people' from 'people with money'.",
+    "log largest room": "Log of the biggest room of the kind this act plays -- indoor acts against the indoor ceiling, outdoor against outdoor.",
+    "has a room big enough": "1 if the market's biggest room of the right kind is at least as large as the room this act uses elsewhere. THE POLICY VARIABLE: it is the only one a new building moves in a way that could not already be achieved by the city getting bigger.",
+    "log km from the tour's other stops": "Distance to the nearest other city this tour played in the country, leaving the focal visit out. It measures SPREAD, not routing efficiency, and its coefficient is positive: tours deliberately space their dates across a country rather than clustering, so the city that gets picked is typically the one furthest from the ones already booked. It is in the model as a control for that spacing pattern, not as a finding.",
+    "log shows already hosted": "How many shows the market ran, minus this tour's own. Specification B only. It proxies everything unobserved that makes a city attractive, and in doing so absorbs part of what capacity delivers.",
+    "spread x log stops in country": "Does the spreading pattern depend on how many cities the tour plays? On the full sample: NO. The coefficient is indistinguishable from zero in both specifications, so a two-stop run and an eight-stop run space their dates the same way. Fitted on Italy alone it came out strongly positive, which was 292 tours' worth of noise -- a useful reminder of what a single country buys you.",
+    "spread x log room needed": "Does it depend on how big the act is? YES. Positive and significant in both specifications: bigger acts space their dates further apart, which is what you would expect when three arena shows have to cover a whole country without competing for the same audience. This is why spread cannot be a single number -- a stadium run and a club run are not playing the same game.",
+    "room big enough x log room needed": "Does having a big enough room matter MORE for bigger acts? Positive, and significant once past activity is controlled for. The capacity constraint binds hardest exactly where the rooms are largest -- which is the case that matters for deciding what to build."
+  },
+  "specs": {
+    "A": {
+      "names": [
+        "log catchment",
+        "log income per head",
+        "log largest room",
+        "has a room big enough",
+        "log km from the tour's other stops",
+        "spread x log stops in country",
+        "spread x log room needed",
+        "room big enough x log room needed"
+      ],
+      "beta": [
+        1.7510276579004584,
+        0.7333820572135352,
+        0.3338920848740617,
+        0.38580631040930646,
+        0.7227900802248136,
+        -0.05367358562312161,
+        0.05149792547194616,
+        0.055204959214842864
+      ],
+      "se": [
+        0.027980490525890824,
+        0.09571314026316528,
+        0.0185146568714976,
+        0.045265878331868785,
+        0.02229182417108838,
+        0.04900090433211956,
+        0.01978134003926966,
+        0.034006598523003514
+      ],
+      "cov": [
+        [
+          0.0007829078500694661,
+          0.00022407373896136728,
+          -2.118972738708348e-05,
+          1.4503326503077067e-05,
+          0.00021001375024927606,
+          0.00014008182081626236,
+          -4.473624389285053e-05,
+          -5.822509041362501e-05
+        ],
+        [
+          0.00022407373896135685,
+          0.009161005219036351,
+          0.000130777649654419,
+          0.00042710294735927686,
+          0.0006288270604182552,
+          0.0005539046405874765,
+          1.5130154408374745e-05,
+          -9.444101031854082e-05
+        ],
+        [
+          -2.11897273870841e-05,
+          0.00013077764965441688,
+          0.0003427925190692934,
+          -0.0005768176185297402,
+          -3.6791932197450424e-05,
+          -0.00018093273011590946,
+          -9.571456460995279e-06,
+          0.00021378802587987744
+        ],
+        [
+          1.450332650307681e-05,
+          0.00042710294735928055,
+          -0.0005768176185297393,
+          0.0020489997411555477,
+          6.414282462953357e-05,
+          0.0004027189112916228,
+          6.82800977351904e-05,
+          -0.00040738361383125057
+        ],
+        [
+          0.0002100137502492754,
+          0.0006288270604182563,
+          -3.679193219745028e-05,
+          6.414282462953338e-05,
+          0.0004969254248747202,
+          0.00034401469707850876,
+          1.0677542721232324e-05,
+          1.2183270362435663e-05
+        ],
+        [
+          0.00014008182081626377,
+          0.0005539046405874739,
+          -0.00018093273011590745,
+          0.0004027189112916182,
+          0.00034401469707850843,
+          0.0024010886253655332,
+          -7.238213689705531e-05,
+          -0.00014763634488154344
+        ],
+        [
+          -4.4736243892851587e-05,
+          1.5130154408381098e-05,
+          -9.571456460991789e-06,
+          6.828009773518201e-05,
+          1.0677542721233456e-05,
+          -7.2382136897051e-05,
+          0.00039130141374921294,
+          6.073282019599971e-05
+        ],
+        [
+          -5.8225090413623995e-05,
+          -9.444101031854281e-05,
+          0.00021378802587987552,
+          -0.000407383613831249,
+          1.2183270362435912e-05,
+          -0.00014763634488154344,
+          6.073282019599326e-05,
+          0.0011564487431047449
+        ]
+      ],
+      "loglik": -53753.28476485959,
+      "pseudo_r2": 0.32499102660076873,
+      "se_kind": "clustered (2,540 clusters)",
+      "iterations": 6
+    },
+    "B": {
+      "names": [
+        "log catchment",
+        "log income per head",
+        "log largest room",
+        "has a room big enough",
+        "log km from the tour's other stops",
+        "spread x log stops in country",
+        "spread x log room needed",
+        "room big enough x log room needed",
+        "log shows already hosted"
+      ],
+      "beta": [
+        0.3956080437472216,
+        -0.00564598166486628,
+        0.012459946327729435,
+        0.28314904530937113,
+        0.5829333938990795,
+        0.0028107868868216296,
+        0.08843577951571005,
+        0.08431477616760197,
+        1.0910969352227486
+      ],
+      "se": [
+        0.03143521183627516,
+        0.0989149606644762,
+        0.02009527922789859,
+        0.050902809188726625,
+        0.021175024545272363,
+        0.037644244539540433,
+        0.018105066629850536,
+        0.033602875324197805,
+        0.02145365607492564
+      ],
+      "cov": [
+        [
+          0.0009881725431914936,
+          0.00020751736937927237,
+          -3.7707237866418345e-05,
+          -0.00010994941589381198,
+          -1.1912866228784481e-05,
+          -0.0002818622900815482,
+          -2.1932639934244636e-05,
+          -4.057942173840834e-05,
+          -0.00036160385669784277
+        ],
+        [
+          0.00020751736937926808,
+          0.009784169443254874,
+          5.4981689954748723e-05,
+          7.226807299216432e-05,
+          0.0004125963143597993,
+          6.165710066534848e-05,
+          9.759140880303998e-05,
+          -9.66380985874605e-05,
+          -0.0001872744505287766
+        ],
+        [
+          -3.7707237866416054e-05,
+          5.49816899547548e-05,
+          0.0004038202472472125,
+          -0.0007480813878026282,
+          -1.325758098460667e-05,
+          -4.130361636531251e-05,
+          1.5632495763495133e-06,
+          0.00020912108967547505,
+          -0.00012681711880997216
+        ],
+        [
+          -0.00010994941589382105,
+          7.226807299215866e-05,
+          -0.0007480813878026302,
+          0.0025910959833039117,
+          -3.5103396712454834e-06,
+          0.00014385336155979056,
+          1.3628659200618907e-05,
+          -0.0004325987575343587,
+          0.00013507567592724515
+        ],
+        [
+          -1.1912866228798191e-05,
+          0.0004125963143597338,
+          -1.3257580984611329e-05,
+          -3.510339671244485e-06,
+          0.00044838166449288696,
+          0.00010291763521814573,
+          3.257380020929799e-05,
+          2.1586131147398544e-05,
+          3.2169071551615933e-05
+        ],
+        [
+          -0.0002818622900815446,
+          6.165710066534391e-05,
+          -4.130361636531859e-05,
+          0.00014385336155980252,
+          0.00010291763521813612,
+          0.0014170891469527196,
+          1.978121908040402e-05,
+          -6.128136156538218e-05,
+          0.0001490457813527476
+        ],
+        [
+          -2.193263993424404e-05,
+          9.75914088030398e-05,
+          1.5632495763493778e-06,
+          1.3628659200618378e-05,
+          3.257380020930169e-05,
+          1.9781219080401148e-05,
+          0.00032779343767132745,
+          3.5895618586751986e-05,
+          1.422435734322325e-06
+        ],
+        [
+          -4.0579421738406844e-05,
+          -9.663809858746281e-05,
+          0.0002091210896754732,
+          -0.0004325987575343555,
+          2.158613114739753e-05,
+          -6.12813615653782e-05,
+          3.589561858675173e-05,
+          0.0011291532300535818,
+          -2.4781306724300576e-05
+        ],
+        [
+          -0.00036160385669784277,
+          -0.00018727445052878788,
+          -0.0001268171188099699,
+          0.000135075675927235,
+          3.216907155159851e-05,
+          0.000149045781352748,
+          1.4224357343222267e-06,
+          -2.4781306724299878e-05,
+          0.0004602593589811938
+        ]
+      ],
+      "loglik": -48726.062577237346,
+      "pseudo_r2": 0.38812056561891495,
+      "se_kind": "clustered (2,540 clusters)",
+      "iterations": 7
+    }
+  }
+}

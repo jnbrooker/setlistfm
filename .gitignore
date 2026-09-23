@@ -52,3 +52,6 @@ since2023/
 
 # per-city workbooks built by city_report.py
 reports/
+
+# personal code walkthrough, not project documentation
+LEARNING.md
