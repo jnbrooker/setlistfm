@@ -335,11 +335,25 @@ def score(target, cand, city_label, country_label):
 # -------------------------------------------------------------------- db ----
 
 def connect(path):
+    """
+    Autocommit, deliberately.
+
+    Python's sqlite3 opens a transaction on the first write and holds it until
+    commit, so batching commits does NOT mean holding the write lock briefly --
+    it means holding it for the whole batch. At ~8s per venue a commit every 25
+    would pin the lock for minutes at a time, and the scraper writes its API
+    quota row on every single request across 12 threads, so it would sit there
+    waiting and then die with "database is locked".
+
+    isolation_level=None makes each statement its own transaction: the lock is
+    taken for a millisecond once per venue, and everything else gets a turn.
+    """
     if not os.path.exists(path):
         raise SystemExit(f"{path} not found")
-    con = sqlite3.connect(path, timeout=120)
+    con = sqlite3.connect(path, timeout=120, isolation_level=None)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA busy_timeout=120000")
     con.row_factory = sqlite3.Row
     return con
 
@@ -480,8 +494,6 @@ def cmd_pull(args, con):
                 best["opened_year"], best["qid"], best["wikipedia"],
                 "wikidata", best_conf, best_how, now))
             tally[best_conf] += 1
-        if i % 25 == 0 or i == len(rows):
-            con.commit()
         if use_bar:
             it.set_postfix(high=tally["High"], med=tally["Medium"],
                            miss=tally["no match"], pace=f"{wd.gap:.1f}s",
@@ -498,7 +510,6 @@ def cmd_pull(args, con):
                 f"{wd.throttled} throttles)")
     if use_bar:
         it.close()
-    con.commit()
     log(f"done: {tally['High']:,} high-confidence matches now available to the build")
     log("   run `python pipeline.py run` (or `build_events.py build-venues`) to use them")
     return 0
