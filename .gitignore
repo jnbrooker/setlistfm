@@ -49,3 +49,6 @@ Thumbs.db
 
 # analysis workbooks and charts built by since2023.py
 since2023/
+
+# per-city workbooks built by city_report.py
+reports/

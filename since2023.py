@@ -92,7 +92,16 @@ def parse_categories(values):
     return out
 
 
-def load_events(db, since, categories, infer=True):
+# The box-office columns roughly double the width of the frame, so they are
+# fetched only when something asks for them (city_report.py does; the Italy
+# workbooks do not).
+POLLSTAR_EXTRA = """, e.source, e.duplicate_risk, e.pollstar_id, e.pollstar_run_shows,
+       e.pollstar_tickets_sold, e.pollstar_capacity, e.pollstar_capacity_pct,
+       e.pollstar_gross_usd, e.pollstar_price_min, e.pollstar_price_max,
+       e.pollstar_price_avg, e.pollstar_promoter, e.pollstar_genre"""
+
+
+def load_events(db, since, categories, infer=True, with_pollstar=False):
     """Events on/after `since` in the chosen categories, with io / io_source added."""
     marks = ",".join("?" * len(categories))
     sql = f"""
@@ -100,6 +109,7 @@ def load_events(db, since, categories, infer=True):
                e.latitude, e.longitude, e.headliner, e.artists, e.tour, e.category, e.event_type,
                e.arena_id, e.arena_name, e.arena_capacity, e.arena_type, e.arena_outside_inside,
                e.venue_capacity, e.venue_capacity_source, e.venue_type, e.venue_outside_inside
+               {POLLSTAR_EXTRA if with_pollstar else ""}
         from events e
         where e.date_iso >= ? and e.category in ({marks})
     """

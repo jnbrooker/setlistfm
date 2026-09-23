@@ -71,7 +71,7 @@ MANUAL_CSV = paths.here("venue_enrichment_manual.csv")
 # trickle. Measured against Wikimedia during their WDQS outage, 3/s and even
 # 1/s were refused within a handful of calls, so the client STARTS slow and
 # earns its way up rather than opening at a pace it will be denied.
-START_GAP_SEC = 5.0       # opening pace: one request every 5 seconds
+START_GAP_SEC = 8.0       # opening pace: one request every 8 seconds
 MIN_GAP_SEC = 1.0         # the fastest it will ever go, once it has earned it
 MAX_GAP_SEC = 60.0        # and the slowest it will crawl before giving up
 MAX_RETRIES = 6
@@ -567,7 +567,7 @@ def main():
     pl.add_argument("--limit", type=int, default=500, help="venues per run")
     pl.add_argument("--min-events", type=int, default=20)
     pl.add_argument("--start-gap", type=float, default=START_GAP_SEC,
-                    help="seconds between requests to open with (default 5)")
+                    help="seconds between requests to open with (default 8)")
     pl.add_argument("--min-gap", type=float, default=MIN_GAP_SEC,
                     help="fastest pace it may speed up to (default 1s)")
     pl.add_argument("--progress-every", type=int, default=10,
