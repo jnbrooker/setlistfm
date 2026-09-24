@@ -50,7 +50,7 @@ side hall differ by a factor.
 
 WHAT IT WRITES
 
-    python arena_alias_review.py
+    python arena_alias_review.py        (from the project root)
 
 A workbook in reports/, every sheet ranked by how many events are at stake so
 the worst splits are read first:
@@ -90,11 +90,15 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MAIN_DB = os.path.join(os.path.dirname(HERE), "setlistfm.db")
-OUT_DIR = os.path.join(HERE, "reports")
+import paths                                            # noqa: E402
 
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))
+MAIN_DB = paths.DB
+OUT_DIR = paths.here("reports")
+
+# venue_dedup lives with the venue model; its vocabulary (sponsors, sub-room
+# markers) and its date-overlap test are reused here so there is one definition.
+sys.path.insert(0, os.path.join(HERE, "venue_model"))
 from venue_dedup import (GENERIC_NAMES, SPONSORS,   # noqa: E402
                          SUBROOM_MARKERS, _overlap_fraction)
 
@@ -125,19 +129,11 @@ CONCURRENT_FRACTION = 0.25
 _PUNCT = None
 
 
-def norm_key(name):
-    """
-    The same aggressive key build_events uses, so an alias proposed here can be
-    compared against arena_aliases.alias_norm without a second convention.
-    """
-    import re
-    s = str(name or "").strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = s.replace("&", " and ").replace("$", "s")
-    s = re.sub(r"[^a-z0-9]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s[4:] if s.startswith("the ") else s
+# The pipeline's own key, imported rather than re-implemented. A second copy
+# drifted: it stripped everything outside a-z0-9 where the pipeline keeps any
+# unicode word character, so a proposal for a non-Latin name would have been
+# keyed differently from the events it was meant to match.
+from artist_categories import norm_key   # noqa: E402,F401
 
 
 def log(msg):

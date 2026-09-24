@@ -51,6 +51,11 @@ KEY_FILE = env_path("JAMBASE_KEY", "setlistfm_key.txt")
 # hand-maintained override lists
 ARTIST_ALIASES_MANUAL = here("artist_aliases_manual.csv")
 ARENA_ALIASES_MANUAL = here("arena_aliases_manual.csv")
+# Hand-made venue identity decisions -- "these names are one building" -- that
+# seed_identity.py folds into venue_identity. A file rather than rows typed into
+# the table, because venue_identity is rebuilt on every seed and a file is what
+# survives that, and what shows up in a git diff when someone changes it.
+VENUE_IDENTITY_MANUAL = here("venue_identity_manual.csv")
 
 # default outputs
 EVENTS_CSV = here("events.csv")

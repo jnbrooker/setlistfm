@@ -63,7 +63,9 @@ def build_fixture(path):
         [("A-FFM", "Festhalle Messe Frankfurt", "Frankfurt", "Germany",
           15000, "Arena", "Inside"),
          ("A-O2", "The O2 Arena", "London", "United Kingdom",
-          20000, "Arena", "Inside")])
+          20000, "Arena", "Inside"),
+         ("A-NOT", "Motorpoint Arena Nottingham", "Nottingham",
+          "United Kingdom", 10000, "Arena", "Inside")])
 
     # Aliases exactly as build_arena_aliases would write them.
     con.executemany(
@@ -74,7 +76,11 @@ def build_fixture(path):
          ("festhalle messe frankfurt", "A-FFM", "Festhalle Messe Frankfurt",
           "name", "frankfurt", "Germany"),
          ("o2 arena", "A-O2", "The O2 Arena", "name", "london",
-          "United Kingdom")])
+          "United Kingdom"),
+         # derived from venue_identity: city-scoped, and in exactly TWO cities,
+         # below the generic threshold -- the gap the bug came through
+         ("motorpoint arena", "A-NOT", "Motorpoint Arena", "identity",
+          "nottingham", "United Kingdom")])
 
     # Five Festhallen in two countries; one real, four not. Plus the control.
     rows = [
@@ -85,6 +91,10 @@ def build_fixture(path):
         ("e5", "Festhalle", "festhalle", "Takamatsu", "takamatsu", "Japan", "JP"),
         ("e6", "The O2 Arena", "o2 arena", "London", "london",
          "United Kingdom", "GB"),
+        ("e7", "Motorpoint Arena", "motorpoint arena", "Nottingham",
+         "nottingham", "United Kingdom", "GB"),
+        ("e8", "Motorpoint Arena", "motorpoint arena", "Sheffield",
+         "sheffield", "United Kingdom", "GB"),
     ]
     con.executemany(
         "INSERT INTO events (event_id, venue, venue_norm, city, city_norm, "
@@ -139,6 +149,16 @@ def main():
             "matches, so the fix has broken ordinary resolution")
     if got["London"][1] != 20000:
         failures.append("the control did not inherit its arena capacity")
+
+    # 4. a venue_identity alias applies ONLY in its own city, even when the
+    #    spelling is in too few cities to count as generic
+    if got["Nottingham"][0] != "A-NOT":
+        failures.append("Nottingham's identity alias no longer matches its "
+                        "own city")
+    if got["Sheffield"][0] is not None:
+        failures.append(
+            f"Sheffield matched {got['Sheffield'][0]} -- a venue_identity alias "
+            f"leaked outside its city through the no-city pass")
 
     if failures:
         for f in failures:

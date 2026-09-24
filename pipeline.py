@@ -14,6 +14,8 @@ their own and means one stage blowing up cannot corrupt another's state.
                                                   one row per building
                                                   (only with --venue-aliases)
     4. fixtures    build_events.py load-fixtures sport fixtures (only with --fixtures)
+    5. identity-review arena_alias_review.py  sponsor renames found by co-location
+    5. identity    seed_identity.py --apply     fold every known name into venue_identity
     5. events      build_events.py build        bills, routing, categories, Pollstar, sport
     6. export      build_events.py export       events.csv  (only with --export)
 
@@ -68,6 +70,16 @@ STEPS = [
     # opt-in for the same reason: the sporting fixtures live in the dashboard
     # workbook's Event Data tab and only change when that file does
     ("fixtures", ["build_events.py", "load-fixtures"], False),
+    # Venue identity: one building, one venue_uid, however many names it has
+    # traded under. The review finds sponsor renames by co-location (which name
+    # similarity cannot see), then the seed folds them -- with the dashboard,
+    # venue_dedup's reviewed merges and venue_identity_manual.csv -- into
+    # venue_identity. `events` derives venue_aliases and arena_aliases from that
+    # table before it matches arenas or assigns venue_uid. Both steps read the
+    # venues table from the PREVIOUS run, so a brand-new rename is folded on
+    # the run after it first appears. Skip with `--skip identity-review identity`.
+    ("identity-review", ["arena_alias_review.py"], True),
+    ("identity", ["seed_identity.py", "--apply"], True),
     ("events", ["build_events.py", "build"], True),   # gets --rematch when --pollstar is set
     ("export", ["build_events.py", "export"], False),
 ]

@@ -234,6 +234,53 @@ CREATE TABLE IF NOT EXISTS venue_aliases (
 CREATE INDEX IF NOT EXISTS ix_venue_alias_canon
     ON venue_aliases(canonical_norm, city_norm, countryCode);
 
+-- THE ONE TABLE A HUMAN EDITS. Everything above about venue identity is
+-- DERIVED from this: `venue_aliases` is every row, `arena_aliases` is the rows
+-- that also carry an arena_id, and both are rebuilt from here rather than from
+-- their own separate input files.
+--
+-- WHY ONE INPUT AND STILL TWO LOOKUPS
+--
+-- The two lookups answer different questions and cannot be collapsed:
+--
+--   venue_aliases  "what is the canonical NAME of this building here?"
+--                  keyed (alias, city, country) -- city is IN the key, which
+--                  is what makes it structurally impossible for one alias to
+--                  reach another town.
+--   arena_aliases  "which dashboard ARENA is this spelling?"
+--                  keyed (alias, arena_id) -- one spelling legitimately names
+--                  several arenas ("o2 arena" is London AND Prague, "hard rock
+--                  live" is Hollywood AND Orlando), disambiguated later by
+--                  city then country.
+--
+-- Give arena_aliases the venue key and it can no longer express the O2; give
+-- venue_aliases the arena key and the festhalle bug comes back. So the tables
+-- keep their shapes, and the duplication that actually hurt -- two hand-edited
+-- inputs, a workbook and a CSV, that could disagree -- is what goes away.
+--
+-- A row whose alias IS its canonical is not redundant: it registers a building
+-- as known, which is how an unmatched venue gets recorded on ingest without
+-- being folded into something it is not.
+CREATE TABLE IF NOT EXISTS venue_identity (
+    alias_norm     TEXT NOT NULL,   -- the spelling as events record it
+    city_norm      TEXT NOT NULL,
+    countryCode    TEXT NOT NULL,
+    canonical_norm TEXT NOT NULL,   -- the spelling that survives
+    canonical      TEXT,            -- readable form of the survivor
+    alias          TEXT,            -- readable form of the spelling
+    arena_id       TEXT,            -- set ONLY for dashboard arenas; nullable
+    country        TEXT,            -- readable, for arena_aliases
+    source         TEXT,            -- dedup | geo | dashboard | manual
+    confidence     TEXT,            -- high | medium | low
+    evidence       TEXT,            -- metres apart, gap, capacity ratio
+    note           TEXT,            -- why, so a later reader can disagree
+    loaded_at      TEXT,
+    PRIMARY KEY (alias_norm, city_norm, countryCode)
+);
+CREATE INDEX IF NOT EXISTS ix_identity_canon
+    ON venue_identity(canonical_norm, city_norm, countryCode);
+CREATE INDEX IF NOT EXISTS ix_identity_arena ON venue_identity(arena_id);
+
 -- Every venue we have ever seen an event at, with the best capacity / type /
 -- indoor-outdoor we can assemble for it, and WHERE each of those came from.
 --
@@ -801,6 +848,10 @@ def cmd_load_venue_aliases(args, conn):
     ensure_columns(conn)
     log("== loading venue aliases ==")
     load_venue_aliases(conn, args.path)
+    # venue_identity supersedes the workbook once seeded: the workbook's
+    # decisions reach venue_identity through seed_identity.py, and leaving them
+    # here as well would let the two disagree.
+    derive_alias_tables(conn)
     remap_enrichment(conn)
     n = scalar(conn, "SELECT COUNT(*) FROM venue_aliases") or 0
     log(f"   venue_aliases now holds {n:,} rows; run `build-venues` (or the "
@@ -875,13 +926,78 @@ def cmd_load_arenas(args, conn):
     build_arena_aliases(conn)
 
 
+def derive_alias_tables(conn):
+    """
+    Make venue_aliases and arena_aliases agree with venue_identity.
+
+    venue_identity is the single source of truth for "these names are one
+    building" -- seeded by seed_identity.py from the dashboard, venue_dedup's
+    reviewed decisions, the manual CSVs and the co-location review. The two
+    lookups the pipeline actually reads are derived from it here:
+
+      venue_aliases   becomes EXACTLY the folds in venue_identity (every row
+                      whose alias differs from its canonical). Replaced whole,
+                      not merged into, so a fold removed from venue_identity
+                      disappears here too instead of living on as a stale row.
+      arena_aliases   gains every venue_identity row that carries an arena_id,
+                      tagged source='identity' so they can be replaced on the
+                      next run without touching the dashboard's own rows.
+
+    Called at the start of every `build`, because that is where venue_uid is
+    assigned and arenas are matched -- and `build` runs on every pipeline run,
+    unlike `load-arenas` and `load-venue-aliases`, which are opt-in. Before
+    this, a normal run never saw an alias unless one of those flags was set.
+
+    Does nothing if venue_identity is empty or absent, so a database that has
+    never been seeded behaves exactly as it did before.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='venue_identity'").fetchone():
+        return 0, 0
+    n_id = scalar(conn, "SELECT COUNT(*) FROM venue_identity") or 0
+    if not n_id:
+        return 0, 0
+    now = utcnow()
+
+    conn.execute("DELETE FROM venue_aliases")
+    folds = conn.execute("""
+        INSERT OR REPLACE INTO venue_aliases
+            (alias_norm, city_norm, countryCode, canonical_norm, canonical,
+             source, note, loaded_at)
+        SELECT alias_norm, city_norm, countryCode, canonical_norm, canonical,
+               COALESCE(source, 'identity'),
+               TRIM(COALESCE(note, '') || CASE WHEN confidence IS NOT NULL
+                    THEN ' [' || confidence || ']' ELSE '' END),
+               ?
+        FROM venue_identity
+        WHERE alias_norm <> canonical_norm""", (now,)).rowcount
+
+    conn.execute("DELETE FROM arena_aliases WHERE source = 'identity'")
+    arenas = conn.execute("""
+        INSERT OR IGNORE INTO arena_aliases
+            (alias_norm, arena_id, alias, source, city_norm, country)
+        SELECT alias_norm, arena_id, COALESCE(alias, alias_norm), 'identity',
+               city_norm, COALESCE(country, '')
+        FROM venue_identity
+        WHERE arena_id IS NOT NULL AND arena_id <> ''""").rowcount
+    # a spelling added here may now name a second arena; keep the flag honest
+    conn.execute("""UPDATE arena_aliases SET ambiguous = (
+                        SELECT COUNT(DISTINCT a2.arena_id) > 1 FROM arena_aliases a2
+                        WHERE a2.alias_norm = arena_aliases.alias_norm)""")
+    conn.commit()
+    log(f"   venue_identity ({n_id:,} rows) -> {folds:,} venue_aliases, "
+        f"{arenas:,} arena_aliases")
+    return folds, arenas
+
+
 def build_arena_aliases(conn):
     """
     One row per known spelling of a venue -> arena_id.
 
     Sources, in order of trust: the canonical `name`, each comma-separated
     entry in `also_known_as`, whatever `matched_venue` recorded from a previous
-    reconciliation, and finally a hand-maintained CSV for anything those miss.
+    reconciliation, then venue_identity, and finally a hand-maintained CSV for
+    anything those miss.
     """
     log("== building arena_aliases ==")
     ensure_columns(conn)          # arena_aliases.ambiguous on an older database
@@ -919,6 +1035,12 @@ def build_arena_aliases(conn):
     conn.executemany("INSERT OR IGNORE INTO arena_aliases "
                      "(alias_norm, arena_id, alias, source, city_norm, country) "
                      "VALUES (?,?,?,?,?,?)", rows)
+
+    # venue_identity fills what the dashboard sheet does not know about. It
+    # runs BEFORE the ambiguity pass below so a spelling contributed here is
+    # counted when deciding whether a name reaches more than one arena.
+    derive_alias_tables(conn)
+
     conn.execute("""UPDATE arena_aliases SET ambiguous = (
                         SELECT COUNT(DISTINCT a2.arena_id) > 1 FROM arena_aliases a2
                         WHERE a2.alias_norm = arena_aliases.alias_norm)""")
@@ -1550,11 +1672,26 @@ WHERE TRIM(COALESCE(venue_id,'')) <> ''
 GENERIC_CITY_THRESHOLD = 3
 
 
+# Aliases that came from venue_identity are CITY-SCOPED BY CONSTRUCTION: that
+# table is keyed on (alias, city, country) because two names in different
+# cities are different buildings. Copied into arena_aliases they must keep that
+# scoping, so they never take the no-geography pass below.
+#
+# Without this the Festhalle bug came back through a gap. The generic flag
+# needs a spelling in THREE cities, so one found in exactly two slipped into
+# the no-city pass: Nottingham's `motorpoint arena` would have handed its arena
+# and capacity to 128 events at Sheffield's former Motorpoint Arena, San Jose's
+# `compaq center` to 48 in Houston, Washington's `verizon center` to 19 in
+# Mankato -- 200 events across five different buildings.
+_IDENTITY = "COALESCE(al.source,'') = 'identity'"
+
 _ALIAS_PASSES = [
     # A name is only matched WITHOUT a geographic check when it is both
     # unambiguous in the arenas reference AND not a generic word in the events
-    # data. Requiring both is the whole of the fix described below.
-    ("specific name", "al.ambiguous = 0 AND COALESCE(al.generic,0) = 0", ""),
+    # data -- and did not come from venue_identity, whose rows only ever mean
+    # something inside the city they were recorded for.
+    ("specific name",
+     f"al.ambiguous = 0 AND COALESCE(al.generic,0) = 0 AND NOT {_IDENTITY}", ""),
     # "City agrees" allows one spelling to extend the other at a WORD BOUNDARY,
     # because the two sources do not name cities the same way: the arenas sheet
     # records Frankfurt's Festhalle under "frankfurt am main" while every event
@@ -1566,8 +1703,8 @@ _ALIAS_PASSES = [
     # does not extend "york", so the pair that would be dangerous cannot join;
     # across every generic alias in the database this rule adds exactly one
     # pairing, the Frankfurt one it was written for.
-    ("ambiguous or generic, city agrees",
-     "(al.ambiguous = 1 OR COALESCE(al.generic,0) = 1)",
+    ("ambiguous, generic or identity, city agrees",
+     f"(al.ambiguous = 1 OR COALESCE(al.generic,0) = 1 OR {_IDENTITY})",
      " AND (al.city_norm = {t}.city_norm"
      "      OR al.city_norm LIKE {t}.city_norm || ' %'"
      "      OR {t}.city_norm LIKE al.city_norm || ' %')"),
@@ -1576,7 +1713,7 @@ _ALIAS_PASSES = [
     # and Frankfurt are both in Germany, and letting country stand in for city
     # is exactly how a village hall inherited an arena's capacity.
     ("ambiguous but specific, country agrees",
-     "al.ambiguous = 1 AND COALESCE(al.generic,0) = 0",
+     f"al.ambiguous = 1 AND COALESCE(al.generic,0) = 0 AND NOT {_IDENTITY}",
      " AND al.country = {t}.country"),
 ]
 
@@ -1893,6 +2030,80 @@ WHERE v.venue_uid = events.venue_uid
 """
 
 
+# Pollstar and setlist.fm name three countries differently. Everything else
+# maps from setlist.fm's own (country -> code) pairs; these are the gaps that
+# left 104 events uncoded, fixed to the codes setlist.fm itself uses.
+COUNTRY_CODE_FALLBACK = {
+    "czech republic": "CZ",           # setlist.fm: Czechia
+    "hong kong": "HK",                # setlist.fm: Hong Kong SAR China
+    "bosnia and herzegovina": "BA",   # setlist.fm: Bosnia & Herzegovina
+}
+
+
+def backfill_country_codes(conn):
+    """
+    Give every event a countryCode before venue_uid is built from it.
+
+    THE BUG THIS FIXES
+
+    setlist.fm events arrive with a two-letter code. Pollstar and fixture rows
+    arrive with only the country NAME -- all 123,305 Pollstar events and all
+    1,718 fixtures had countryCode empty. venue_uid is `name|city|countryCode`,
+    so a sport or family show at a building came out as
+    `verizon center|washington|` while the concerts there were
+    `verizon center|washington|US`: one building, split in two along the line
+    between data sources. It also meant venue_identity could never fold those
+    events, since its lookup is keyed on the code too.
+
+    The mapping is taken from the data rather than hard-coded: every
+    (country name -> code) pair that setlist.fm events already carry, most
+    common first. On the current database that is 234 names with not one
+    mapping to two codes, covering 99.9% of the missing rows; the fallback
+    above closes the rest.
+
+    Only EMPTY codes are filled. A code that is already present is never
+    overwritten, so this cannot disturb a setlist.fm row.
+    """
+    missing = scalar(conn, """SELECT COUNT(*) FROM events
+                              WHERE COALESCE(countryCode,'') = ''
+                                AND COALESCE(country,'') <> ''""") or 0
+    if not missing:
+        return 0
+    conn.execute("DROP TABLE IF EXISTS temp.cc_map")
+    # A name's code is adopted only when it is CLEARLY DOMINANT -- at least 90%
+    # of the rows carrying that name. A bare "most common" had no tie-break, and
+    # the fixture test showed one stray bad code winning a 1-1 tie and being
+    # copied onto every Pollstar row for that country. Where no code dominates,
+    # the rows are left empty rather than guessed at: an uncoded event is
+    # visible and fixable, a wrongly coded one quietly joins the wrong building.
+    conn.execute("""
+        CREATE TEMP TABLE cc_map AS
+        SELECT k, countryCode FROM (
+            SELECT lower(TRIM(country)) AS k, countryCode, COUNT(*) AS n,
+                   SUM(COUNT(*)) OVER (PARTITION BY lower(TRIM(country))) AS tot,
+                   ROW_NUMBER() OVER (PARTITION BY lower(TRIM(country))
+                                      ORDER BY COUNT(*) DESC, countryCode) AS rn
+            FROM events
+            WHERE COALESCE(countryCode,'') <> '' AND COALESCE(country,'') <> ''
+            GROUP BY lower(TRIM(country)), countryCode)
+        WHERE rn = 1 AND n >= 0.9 * tot""")
+    for k, cc in COUNTRY_CODE_FALLBACK.items():
+        conn.execute("""INSERT INTO temp.cc_map (k, countryCode)
+                        SELECT ?, ? WHERE NOT EXISTS
+                        (SELECT 1 FROM temp.cc_map WHERE k = ?)""", (k, cc, k))
+    conn.execute("CREATE INDEX temp.ix_cc_map ON cc_map(k)")
+    filled = conn.execute("""
+        UPDATE events SET countryCode =
+            (SELECT m.countryCode FROM temp.cc_map m
+              WHERE m.k = lower(TRIM(events.country)))
+        WHERE COALESCE(countryCode,'') = ''
+          AND lower(TRIM(country)) IN (SELECT k FROM temp.cc_map)""").rowcount
+    conn.commit()
+    log(f"   country codes: filled {filled:,} of {missing:,} events that had "
+        f"only a country name (Pollstar and fixture rows)")
+    return filled
+
+
 def cmd_build_venues(args, conn):
     """
     Assemble one row per BUILDING from everything we already hold.
@@ -1913,6 +2124,9 @@ def cmd_build_venues(args, conn):
     now = utcnow()
     ensure_columns(conn)
     log("== building venues ==")
+
+    # venue_uid is keyed on countryCode, so every event needs one first
+    backfill_country_codes(conn)
 
     # the canonical building id, written back onto events so nothing needs to
     # recompute it later
@@ -1972,6 +2186,35 @@ def cmd_build_venues(args, conn):
         WHERE TRIM(COALESCE(venue_uid,'')) <> ''
         GROUP BY venue_uid""")
     conn.commit()
+
+    # THE BUILDING'S NAME IS ITS CANONICAL, NOT THE ALPHABETICALLY LAST SPELLING.
+    #
+    # MAX(venue) above picks whichever raw name sorts last, which for a merged
+    # building is arbitrary: the Milan forum would have been labelled "Unipol
+    # Forum" purely because U sorts after M. Where venue_identity names a
+    # canonical for this venue_uid, that is the name shown -- the raw spellings
+    # stay in `aliases`, and every event keeps the name it was recorded under.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='venue_identity'").fetchone():
+        conn.execute("DROP TABLE IF EXISTS tmp_canon")
+        conn.execute("""
+            CREATE TEMP TABLE tmp_canon AS
+            SELECT canonical_norm || '|' || city_norm || '|' || countryCode AS venue_uid,
+                   MAX(canonical)      AS canonical,
+                   MAX(canonical_norm) AS canonical_norm
+            FROM venue_identity
+            WHERE TRIM(COALESCE(canonical, '')) <> ''
+            GROUP BY 1""")
+        conn.execute("CREATE INDEX tmp_canon_uid ON tmp_canon(venue_uid)")
+        named = conn.execute("""
+            UPDATE tmp_venues SET
+                venue      = (SELECT c.canonical FROM tmp_canon c
+                              WHERE c.venue_uid = tmp_venues.venue_uid),
+                venue_norm = (SELECT c.canonical_norm FROM tmp_canon c
+                              WHERE c.venue_uid = tmp_venues.venue_uid)
+            WHERE venue_uid IN (SELECT venue_uid FROM tmp_canon)""").rowcount
+        conn.commit()
+        log(f"      {named:,} building(s) named from venue_identity")
 
     # `capacity` used to be MAX(pollstar_capacity), so one mis-keyed row set a
     # building's size for good -- a Wheatland amphitheatre came out at 186,000
@@ -2159,6 +2402,17 @@ def cmd_build(args, conn):
     if n_cats == 0:
         log("!! artist_categories is empty - events will have no categories. "
             "Run `python artist_categories.py refresh` first.")
+
+    # Venue identity FIRST: stage 4 matches arenas through arena_aliases and
+    # the last stage assigns venue_uid through venue_aliases, so both must
+    # already reflect venue_identity before either happens. Runs on every
+    # build because `build` runs on every pipeline run; the loaders that used
+    # to be the only way in (`load-arenas`, `load-venue-aliases`) are opt-in.
+    log("== venue identity ==")
+    derive_alias_tables(conn)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='ref_venue_enrichment'").fetchone():
+        remap_enrichment(conn)
 
     src = scalar(conn, "SELECT COUNT(*) FROM setlists "
                        "WHERE TRIM(COALESCE(date_iso,''))<>'' "

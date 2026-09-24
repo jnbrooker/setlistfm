@@ -51,16 +51,21 @@ import sys
 
 import pandas as pd
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MAIN_DB = os.path.join(os.path.dirname(HERE), "setlistfm.db")
-MANUAL_CSV = os.path.join(os.path.dirname(HERE), "arena_aliases_manual.csv")
-OUT_DIR = os.path.join(HERE, "reports")
+import paths                                            # noqa: E402
 
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))
+MAIN_DB = paths.DB
+MANUAL_CSV = paths.ARENA_ALIASES_MANUAL
+IDENTITY_MANUAL = paths.VENUE_IDENTITY_MANUAL
+OUT_DIR = paths.here("reports")
+
 from arena_alias_review import norm_key   # noqa: E402
 
 # Trust order. A key already claimed by an earlier source is never rewritten.
-SOURCE_RANK = {"dashboard": 0, "dedup": 1, "manual": 2, "geo": 3}
+# `manual` is venue_identity_manual.csv -- a human's explicit decision, so it
+# outranks everything except the dashboard's own verified name. `arena_csv` is
+# the older arena_aliases_manual.csv, kept readable so nothing in it is lost.
+SOURCE_RANK = {"dashboard": 0, "manual": 1, "dedup": 2, "arena_csv": 3, "geo": 4}
 
 
 def log(msg):
@@ -138,21 +143,47 @@ def country_code(con, country):
     """
     if not country:
         return ""
-    key = str(country).strip().lower()
-    if key in _CC_CACHE:
-        return _CC_CACHE[key]
-    row = con.execute("SELECT countryCode FROM events WHERE lower(country)=? "
-                      "AND countryCode IS NOT NULL AND countryCode <> '' "
-                      "LIMIT 1", (key,)).fetchone()
-    _CC_CACHE[key] = row[0] if row else ""
-    return _CC_CACHE[key]
+    # Built once, from `venues` (341k rows), not looked up per country in
+    # `events` (4.2M rows, no index on country). The per-country version was a
+    # full scan of a 7.9 GB table for every distinct country in the arenas
+    # sheet, and turned a seconds-long dry run into one that never finished.
+    if not _CC_CACHE:
+        for name, cc in con.execute(
+                "SELECT lower(TRIM(country)), countryCode FROM venues "
+                "WHERE countryCode IS NOT NULL AND countryCode <> '' "
+                "AND country IS NOT NULL GROUP BY 1, 2 ORDER BY COUNT(*)"):
+            _CC_CACHE[name] = cc          # most common code wins (ordered last)
+    return _CC_CACHE.get(str(country).strip().lower(), "")
 
 
 def from_venue_aliases(con):
-    """The decisions venue_dedup already had loaded -- reviewed when made."""
-    d = pd.read_sql("""SELECT alias_norm, city_norm, countryCode,
-                              canonical_norm, canonical, note
-                       FROM venue_aliases""", con)
+    """
+    venue_dedup's reviewed decisions, read from its WORKBOOK, not the table.
+
+    venue_aliases is now DERIVED from venue_identity, so reading it back here
+    would make the table feed on its own output: a fold removed from the
+    review would live on forever as a "dedup" row. The workbook is the
+    original human decision, so it is the input. The table is read only as a
+    fallback, and only its genuine dedup rows, if the workbook is missing.
+    """
+    import glob
+    hits = sorted(glob.glob(paths.here(os.path.join(
+        "venue_model", "reports", "venue_dedup_*.xlsx"))))
+    if hits:
+        w = pd.read_excel(hits[-1], sheet_name="All candidates")
+        w = w[w["should_merge"].fillna(False).astype(bool)]
+        d = pd.DataFrame({
+            "alias_norm": w["fold_norm"].astype(str),
+            "city_norm": w["city"].map(norm_key),
+            "countryCode": w["countryCode"].fillna("").astype(str),
+            "canonical_norm": w["keep_norm"].astype(str),
+            "canonical": w["keep"],
+            "note": os.path.basename(hits[-1]),
+        })
+    else:
+        d = pd.read_sql("""SELECT alias_norm, city_norm, countryCode,
+                                  canonical_norm, canonical, note
+                           FROM venue_aliases WHERE source = 'dedup'""", con)
     if d.empty:
         return d
     d["alias"] = d["alias_norm"]
@@ -164,7 +195,40 @@ def from_venue_aliases(con):
     return d
 
 
-def from_manual_csv(path=MANUAL_CSV):
+def from_identity_manual(con, path=None):
+    """
+    venue_identity_manual.csv -- hand-made "these names are one building".
+
+    Columns: alias, city, countryCode, canonical, arena_id (optional), note.
+    countryCode is REQUIRED and must be the two-letter code events carry,
+    because venue_uid is keyed on it; a row without one would never match an
+    event, which is the silent failure the older CSV had.
+    """
+    path = path or IDENTITY_MANUAL
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    rows = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            alias = (r.get("alias") or "").strip()
+            canon = (r.get("canonical") or "").strip() or alias
+            cc = (r.get("countryCode") or "").strip().upper()
+            if not alias or not cc:
+                if alias:
+                    log(f"   !! {path}: '{alias}' has no countryCode - skipped")
+                continue
+            rows.append({
+                "alias_norm": norm_key(alias), "city_norm": norm_key(r.get("city")),
+                "countryCode": cc, "canonical_norm": norm_key(canon),
+                "canonical": canon, "alias": alias,
+                "arena_id": (r.get("arena_id") or "").strip() or None,
+                "country": None, "source": "manual", "confidence": "high",
+                "evidence": None, "note": (r.get("note") or "").strip() or "manual",
+            })
+    return pd.DataFrame(rows)
+
+
+def from_manual_csv(con, path=MANUAL_CSV):
     """arena_aliases_manual.csv -- the file the old flow told you to edit."""
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -177,9 +241,12 @@ def from_manual_csv(path=MANUAL_CSV):
                 continue
             rows.append({
                 "alias_norm": norm_key(alias), "city_norm": norm_key(r.get("city")),
-                "countryCode": "", "canonical_norm": norm_key(alias),
+                # was "" -- which made every row here unmatchable, since events
+                # carry the two-letter code and venue_uid is keyed on it
+                "countryCode": country_code(con, r.get("country")),
+                "canonical_norm": norm_key(alias),
                 "canonical": alias, "alias": alias, "arena_id": aid,
-                "country": r.get("country"), "source": "manual",
+                "country": r.get("country"), "source": "arena_csv",
                 "confidence": "high", "evidence": None,
                 "note": "arena_aliases_manual.csv",
             })
@@ -240,7 +307,8 @@ def assemble(con, min_confidence="high", review_path=None):
     parts = []
     for name, frame in (("dashboard", from_dashboard(con)),
                         ("dedup", from_venue_aliases(con)),
-                        ("manual", from_manual_csv()),
+                        ("manual", from_identity_manual(con)),
+                        ("arena_csv", from_manual_csv(con)),
                         ("geo", from_review(review_path, min_confidence))):
         if len(frame):
             log(f"   {name:10s} {len(frame):6,} rows")
@@ -262,10 +330,18 @@ def assemble(con, min_confidence="high", review_path=None):
                      suffixes=("", "_win"))
     clashes = merged[(merged["_rank"] > merged["source_win"].map(SOURCE_RANK))
                      & (merged["canonical_norm"] != merged["canonical_norm_win"])]
-    return resolve_chains(winners.drop(columns="_rank")), clashes
+    # Every row -- losers included -- goes in as an EDGE. A clash is a
+    # disagreement about which spelling is canonical; it is not a disagreement
+    # about whether the two spellings are the same building. Dropping the
+    # losing row dropped that fact, and Nottingham came out as two buildings:
+    # the dedup edge `nottingham arena -> capital fm arena nottingham` was the
+    # only bridge between the dashboard's names and the older sponsor names.
+    return (resolve_chains(winners.drop(columns="_rank"),
+                           edges=d.drop(columns="_rank")),
+            clashes)
 
 
-def resolve_chains(d):
+def resolve_chains(d, edges=None):
     """
     Make every name point DIRECTLY at its final survivor.
 
@@ -305,7 +381,7 @@ def resolve_chains(d):
     # cities are different buildings, which is the guard the whole schema rests
     # on and is not relaxed here.
     node = lambda n, c, k: (n, c, k)   # noqa: E731
-    for r in d.itertuples():
+    for r in (edges if edges is not None else d).itertuples():
         union(node(r.alias_norm, r.city_norm, r.countryCode),
               node(r.canonical_norm, r.city_norm, r.countryCode))
 
@@ -360,6 +436,48 @@ def resolve_chains(d):
     readable.update(dict(zip(zip(d["alias_norm"], d["city_norm"], d["countryCode"]),
                              d["alias"])))
     out["canonical"] = [readable.get(s, s[0]) for s in survivors]
+
+    # EVERY NON-SURVIVING NAME NEEDS A ROW OF ITS OWN.
+    #
+    # A spelling can enter a group only as somebody's CANONICAL -- the old
+    # dedup decisions pointed `nottingham arena` and `trent fm arena
+    # nottingham` AT `capital fm arena nottingham`, and nothing pointed
+    # `capital fm arena nottingham` anywhere. Once the group's survivor became
+    # Motorpoint Arena Nottingham, that former canonical had no row, so the
+    # 157 events recorded under it kept their own venue_uid: the building was
+    # still split, just along a different line. Each such name is given an
+    # explicit fold to the survivor, inheriting the source of the row that
+    # named it.
+    have = set(zip(out["alias_norm"], out["city_norm"], out["countryCode"]))
+    # Provenance comes from EVERY edge, not only the winners, keeping the most
+    # trusted source that named the node. Reading winners alone mislabelled
+    # `capital fm arena nottingham`: the dedup edge that named it had lost its
+    # key to the dashboard, so the fold fell through to the default and was
+    # written as a medium-confidence geo guess -- the exact row someone pruning
+    # weak guesses would delete, splitting Nottingham again.
+    src_of, src_rank = {}, {}
+    for r in (edges if edges is not None else d).itertuples():
+        n = node(r.canonical_norm, r.city_norm, r.countryCode)
+        rk = SOURCE_RANK.get(r.source, 9)
+        if rk < src_rank.get(n, 99):
+            src_rank[n] = rk
+            src_of[n] = (r.source, r.confidence, r.arena_id, r.country)
+    extra = []
+    for n in list(parent):
+        survivor = best.get(find(n), (None, None))[1]
+        if survivor is None or n == survivor or n in have:
+            continue
+        s, conf, aid, ctry = src_of.get(n, ("geo", "medium", None, None))
+        extra.append({
+            "alias_norm": n[0], "city_norm": n[1], "countryCode": n[2],
+            "canonical_norm": survivor[0],
+            "canonical": readable.get(survivor, survivor[0]),
+            "alias": readable.get(n, n[0]), "arena_id": aid, "country": ctry,
+            "source": s, "confidence": conf, "evidence": None,
+            "note": "former canonical, folded to its group's survivor",
+        })
+    if extra:
+        out = pd.concat([out, pd.DataFrame(extra)], ignore_index=True)
     return out
 
 
@@ -384,7 +502,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=MAIN_DB)
     ap.add_argument("--review", default=None, help="review workbook to seed from")
-    ap.add_argument("--min-confidence", default="high",
+    # medium by decision: high alone missed real renames whose room was
+    # reconfigured (the Assago forum's capacity moved x1.5 between sponsors)
+    ap.add_argument("--min-confidence", default="medium",
                     choices=["high", "medium", "low"])
     ap.add_argument("--apply", action="store_true",
                     help="write to venue_identity; without it, only report")
@@ -395,7 +515,10 @@ def main():
     log("assembling venue_identity ...")
     d, clashes = assemble(con, a.min_confidence, a.review)
     if d.empty:
-        raise SystemExit("nothing to seed")
+        # Not an error: this runs inside the pipeline, and an empty input must
+        # not stop the events build. The previous venue_identity is left alone.
+        print("nothing to seed - venue_identity left unchanged")
+        return
 
     print(f"\n{'=' * 70}")
     print(f"venue_identity would hold {len(d):,} rows")
@@ -413,12 +536,28 @@ def main():
               .to_string(index=False))
     print("=" * 70)
 
+    # The review copy is written on every run, applied or not, so what went into
+    # the table can always be read back as a sheet.
+    os.makedirs(OUT_DIR, exist_ok=True)
+    review = os.path.join(
+        OUT_DIR, f"venue_identity_review_{dt.date.today():%Y-%m-%d}.xlsx")
+    fold_rows = d[d["alias_norm"] != d["canonical_norm"]].sort_values(
+        ["countryCode", "city_norm", "canonical_norm", "alias_norm"])
+    cols = ["canonical", "alias", "city_norm", "countryCode", "arena_id",
+            "source", "confidence", "evidence", "note"]
+    with pd.ExcelWriter(review) as w:
+        fold_rows[cols].to_excel(w, sheet_name="folds (review these)", index=False)
+        clashes.to_excel(w, sheet_name="clashes (dropped)", index=False)
+        d[cols].to_excel(w, sheet_name="all rows", index=False)
+    print(f"\nreview: {review}")
+
     if not a.apply:
-        print("\nnothing written. re-run with --apply")
+        print("nothing written to the database. re-run with --apply")
         return
     n = write(con, d)
     log(f"wrote {n:,} rows to venue_identity")
-    log("now run:  python build_events.py load-arenas   (rebuilds both lookups)")
+    log("`build_events.py build` derives venue_aliases and arena_aliases "
+        "from it at the start of every run")
 
 
 if __name__ == "__main__":
