@@ -22,6 +22,8 @@ apis.txt
 # generated tables and working exports
 *.csv
 !*.example.csv
+# hand-made decisions, not generated: nothing can rebuild them, so track them
+!*_manual.csv
 
 # ------------------------------------------------------------- runtime state
 setlistfm_state/

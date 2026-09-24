@@ -702,17 +702,16 @@ def main():
     nofix = not_fixable_by_alias(ren) if len(ren) else pd.DataFrame()
     blanks = blank_country_splits(v)
     arena_rows = arena_alias_rows(ren, aliases, arenas)
+    # No proposed CSV any more: seed_identity reads the high and medium renames
+    # straight from this workbook into venue_identity, and `build` derives
+    # arena_aliases from that, so a file to paste by hand only invited confusion.
     if len(arena_rows):
         hi = arena_rows[arena_rows["confidence"].isin(["high", "medium"])]
-        csv_path = os.path.join(
-            OUT_DIR, f"arena_aliases_manual_proposed_{dt.date.today():%Y-%m-%d}.csv")
-        os.makedirs(OUT_DIR, exist_ok=True)
-        hi[["alias", "arena_id", "city", "country"]].to_csv(csv_path, index=False)
         print("")
         print(f"ARENA DIRECTORY         {len(arena_rows):,} spelling(s) not yet "
-              f"in arena_aliases; {len(hi):,} written in the")
-        print(f"                        arena_aliases_manual.csv format to "
-              f"{os.path.basename(csv_path)}")
+              f"in arena_aliases; {len(hi):,} high/medium reach it via")
+        print(f"                        venue_identity on this run; the rest "
+              f"are listed in the workbook for review")
     if len(blanks):
         print("")
         print(f"BLANK COUNTRY SPLITS    {len(blanks):,} buildings split by a "

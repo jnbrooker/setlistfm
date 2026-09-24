@@ -1,6 +1,6 @@
 {
   "tag": "since2012",
-  "built_at": "2026-09-24T09:42:29",
+  "built_at": "2026-09-24T14:10:06",
   "since": "2012-01-01",
   "categories": [
     "Category A",
@@ -27,22 +27,22 @@
   "min_city_events": 5,
   "market_radius_km": 15,
   "rows": {
-    "markets": 1464,
-    "cities": 2435,
-    "market_members": 971,
-    "venues": 24570,
-    "tours": 14031,
-    "tour_city": 110299
+    "markets": 1460,
+    "cities": 2429,
+    "market_members": 969,
+    "venues": 24481,
+    "tours": 14021,
+    "tour_city": 110055
   },
   "event_date_range": [
     "2012-01-01",
-    "2026-09-21"
+    "2026-09-26"
   ],
   "sources": {
     "events": {
       "path": "C:\\setlistfm\\setlistfm.db",
-      "bytes": 7877619712,
-      "modified": "2026-09-24T09:11:10"
+      "bytes": 8348962816,
+      "modified": "2026-09-24T13:53:41"
     },
     "demographics": {
       "path": "C:\\database-creation\\demographicdata.db",
