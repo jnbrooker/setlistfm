@@ -92,6 +92,16 @@ VARIABLE_NOTES = {
     "log income per head": (
         "Log of disposable spending power per resident. Separates 'lots of "
         "people' from 'people with money'."),
+    "log fit gap": (
+        "How far the market's CLOSEST room is from what this act plays, in "
+        "log seats. Zero is a perfect fit. It exists because the ceiling alone "
+        "made a market whose only room is a 20,000 arena score 'big enough' "
+        "for an act that plays to 800 -- true, and useless. This is what a "
+        "promoter is actually judging: not whether the city has a big room, "
+        "but whether it has the RIGHT room. Adding it lifted out-of-sample "
+        "fit more than any other variable in the model, and pulled the raw "
+        "size coefficient down by a third, which is the tell that size was "
+        "standing in for fit all along."),
     "log largest room": (
         "Log of the biggest room of the kind this act plays -- indoor acts "
         "against the indoor ceiling, outdoor against outdoor."),
@@ -134,6 +144,16 @@ VARIABLE_NOTES = {
 }
 
 
+def _fitgap_median(rows):
+    """Median fit gap, for filling markets with no room of a known size."""
+    best = pd.to_numeric(rows.get("best_room"), errors="coerce")
+    need = pd.to_numeric(rows.get("room_needed"), errors="coerce")
+    if best is None or best.notna().sum() == 0:
+        return 0.75
+    g = (np.log(best.clip(lower=50)) - np.log(need.clip(lower=50))).abs()
+    return float(g.median()) if g.notna().any() else 0.75
+
+
 def design_constants(rows):
     """
     The six numbers design() takes from the WHOLE sample rather than from the
@@ -168,6 +188,7 @@ def design_constants(rows):
         "ceiling_floor": (float(np.nanpercentile(ceil.dropna(), 1))
                           if ceil.notna().any() else 500.0),
         "need_median": float(need.median()) if need.notna().any() else 1000.0,
+        "fitgap_median": _fitgap_median(rows),
         "km_median": float(km.median()) if km.notna().any() else 0.0,
         "stops_mean": float(stops.mean()),
         "big_mean": float(big.mean()),
@@ -219,6 +240,18 @@ def design(rows, spec="A", consts=None):
 
     cols.append(((ceil.fillna(0) >= need) & need.notna()).astype(float))
     names.append("has a room big enough")
+
+    # HOW WELL THE MARKET'S LADDER FITS THIS ACT, as opposed to how big its
+    # biggest room is. See VARIABLE_NOTES for why the ceiling alone was not
+    # enough. Absolute log distance, so being half the right size and twice
+    # the right size are equally poor fits -- which is the honest reading: an
+    # act does not want a room it cannot fill any more than one it cannot
+    # get into.
+    best = pd.to_numeric(rows.get("best_room"), errors="coerce") \
+        if "best_room" in rows else pd.Series(np.nan, index=rows.index)
+    gap = (np.log(best.clip(lower=50)) - np.log(need.clip(lower=50))).abs()
+    cols.append(gap.fillna(k.get("fitgap_median", 0.75)))
+    names.append("log fit gap")
 
     # NOT a routing-efficiency measure, despite the obvious reading.
     #

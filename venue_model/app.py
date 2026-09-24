@@ -19,6 +19,8 @@ touring acts than it should? Everything else follows from that.
   Design a venue      put a room that does not exist into a market
   Build case          if a market is short of tours, what size room the
                       blocked acts actually use
+  Did rooms work?     Layer 3 — what actually happened to cities when a room
+                      really opened, which is the only causal evidence here
   Method & limits     thresholds, the fitted model, what the data cannot say
 
 FOUR RULES GOVERN THIS FILE
@@ -40,6 +42,7 @@ RUN IT
 """
 
 import os
+import re
 import sys
 
 import altair as alt
@@ -51,6 +54,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import boxoffice as BO                                           # noqa: E402
+import did                                                       # noqa: E402
+import layer3 as L3                                              # noqa: E402
 import probability as PR                                         # noqa: E402
 import recommend as R                                            # noqa: E402
 import renovate as RN                                            # noqa: E402
@@ -174,9 +179,22 @@ def explain(text):
 # ---------------------------------------------------------------------------
 
 extracts_dir = os.path.join(HERE, "extracts")
-folders = sorted((os.path.join(extracts_dir, d) for d in os.listdir(extracts_dir)
-                  if os.path.isdir(os.path.join(extracts_dir, d))), reverse=True) \
+
+
+def _is_dated(path):
+    """A standard dated snapshot, as opposed to a named one like since2012."""
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", os.path.basename(path)))
+
+
+# Dated snapshots first, newest first; named ones after. Plain
+# reverse-alphabetical put "since2012" above "2026-09-23", so the app defaulted
+# to the fifteen-year extract -- the right panel for Layer 3 and the wrong one
+# for Layer 2, for the reason in the warning below.
+_all = sorted((os.path.join(extracts_dir, d) for d in os.listdir(extracts_dir)
+               if os.path.isdir(os.path.join(extracts_dir, d)))) \
     if os.path.isdir(extracts_dir) else []
+folders = ([f for f in _all if _is_dated(f)][::-1]
+           + [f for f in _all if not _is_dated(f)])
 if not folders:
     st.error("No extract found. Run `python extract.py` first.")
     st.stop()
@@ -187,6 +205,24 @@ with st.sidebar:
     ex = get_extract(folder)
     markets = ex["markets"]
     st.caption(f"{len(markets):,} markets · snapshot {os.path.basename(folder)}")
+
+    # A long window measures venue attributes ANACHRONISTICALLY. The extract
+    # records each market's biggest-ever room, but the choices span every year
+    # in the window -- so a city that built an arena in 2018 is credited with
+    # it back in 2012. Five of Italy's ten largest rooms first appear after
+    # 2013. That is measurement error on the key variable and it attenuates the
+    # capacity coefficient toward zero: 1.31-1.43 on a four-year extract
+    # against 1.11-1.15 on a fifteen-year one.
+    _span = whatif.years_covered(ex)
+    if _span and _span > 6:
+        st.warning(
+            f"**This extract spans {_span:.0f} years, which weakens Layer 2.** "
+            f"Venue capacities are recorded once, as each market's biggest-ever "
+            f"room, but the choices run across the whole window — so a city "
+            f"that built an arena in 2018 is treated as having had it in 2012. "
+            f"That measurement error pushes the capacity coefficient toward "
+            f"zero. Use a short dated snapshot for these screens; the long one "
+            f"is for Layer 3, which handles time properly with a panel.")
 
     st.markdown("### Is it a market at all?")
     min_kept = st.slider(
@@ -451,9 +487,10 @@ def counterfactual_panel(menu, a, b, city, kind, capacity, compact=False):
 # ---------------------------------------------------------------------------
 
 (tab_prob, tab_how, tab_perf, tab_market, tab_venue, tab_renovate, tab_design,
- tab_build, tab_method) = st.tabs(
+ tab_build, tab_did, tab_method) = st.tabs(
     ["Chances", "How it works", "Tours vs expected", "Market", "Venue",
-     "Renovate", "Design a venue", "Build case", "Method & limits"])
+     "Renovate", "Design a venue", "Build case", "Did rooms work?",
+     "Method & limits"])
 
 # One palette for the whole probability screen, so a colour means the same
 # thing on every chart: blue is how things are, green is what a room adds,
@@ -470,6 +507,80 @@ def get_boxoffice():
 @st.cache_data(show_spinner=False)
 def get_performance(folder):
     return BO.performance_table(get_extract(folder))
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: the natural experiment
+#
+# Cheap to run -- about a second -- so it is keyed on every control and simply
+# re-run rather than hidden behind a button. The bootstrap is the exception and
+# has its own; it is minutes, not seconds, because every resample refits the
+# whole group-time grid.
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner="running the natural experiment ...")
+def get_layer3(folder, min_capacity, outcome, use_log, control):
+    ex_ = get_extract(folder)
+    panel, op = L3.assemble(ex_, min_capacity, outcome, use_log)
+    treated = op[op["cohort"] > 0]
+    years = sorted(int(y) for y in panel["year"].unique())
+    out = {
+        "panel": panel, "op": op, "treated": treated, "years": years,
+        "dropped": int(panel.attrs.get("dropped_units", 0)),
+        "n_treated": int(len(treated)),
+        "n_control": int((op["cohort"] == 0).sum()),
+        "n_markets": int(panel["unit"].nunique()),
+        "val": L3.validate_openings(ex_, op, min_capacity),
+        "unit_label": "log visits" if use_log else f"{outcome} a year",
+    }
+    # Below the threshold no estimate is produced at all. A number from five
+    # cities would be read as a finding, so the guard is enforced here exactly
+    # as it is in the CLI rather than softened for the screen.
+    if len(treated) < L3.MIN_TREATED_FOR_A_DESIGN:
+        out["ok"] = False
+        return out
+
+    gt = did.att_gt(panel, "unit", "year", "y", "cohort", control)
+    out.update(ok=True, gt=gt, es=did.event_study(gt),
+               att=did.overall_att(gt), pre=did.pretrend_test(gt),
+               dt=did.detrend(gt))
+    return out
+
+
+@st.cache_data(show_spinner="re-running at each threshold ...")
+def get_layer3_robustness(folder, caps, outcome, use_log, control):
+    """
+    The same design at several treatment thresholds.
+
+    This is the check that matters most for Layer 3 and it is cheap, so it is
+    always on screen rather than tucked into an expander. If the sign of the
+    effect depends on where the threshold is put, there is no finding.
+    """
+    rows = []
+    for cap in caps:
+        r = get_layer3(folder, int(cap), outcome, use_log, control)
+        rows.append({
+            "room counts as an opening at": int(cap),
+            "treated markets": r["n_treated"],
+            "cohorts": int(r["treated"]["cohort"].nunique()) if r["n_treated"] else 0,
+            "raw effect": round(r["att"], 2) if r.get("ok") else None,
+            "pre-trend size": round(r["pre"]["size"], 2) if r.get("ok") else None,
+            "after removing the pre-trend":
+                (round(r["dt"]["detrended_att"], 2)
+                 if r.get("ok") and r["dt"].get("ok") else None),
+            "venues with a known opening year to check against":
+                int(r["val"]["checked"]),
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def get_layer3_bootstrap(folder, min_capacity, outcome, use_log, control, reps):
+    r = get_layer3(folder, min_capacity, outcome, use_log, control)
+    if not r.get("ok"):
+        return None
+    return did.bootstrap(r["panel"], int(reps), unit="unit", time="year",
+                         outcome="y", cohort="cohort", control=control)
 
 
 
@@ -540,6 +651,25 @@ with tab_prob:
         k4.metric("Tour-visits it actually got", f"{actual / years:.1f}",
                   delta=f"{actual:,} over {years:.1f} years",
                   delta_color="off")
+        # getattr, not a bare call: Streamlit re-executes this file on every
+        # rerun but does NOT reload imported modules, so a server started
+        # before a helper was added holds a stale `probability` in sys.modules
+        # and the page dies on an AttributeError. A missing helper should cost
+        # one panel, not the whole screen.
+        _share = getattr(PR, "touring_share", None)
+        cov = _share(ex, p_city, p_code) if _share else None
+        if _share is None:
+            st.caption("Coverage panel unavailable — restart the Streamlit "
+                       "server to pick up the latest venue_model modules.")
+        if cov:
+            msg = (f"**This model sees {cov['share']:.0%} of "
+                   f"{p_city}'s shows** — {cov['touring_dates']:,.0f} touring "
+                   f"dates out of {cov['all_events']:,.0f} events. The rest "
+                   f"are one-off local gigs, residencies and single-date "
+                   f"festivals, which involved no choice between cities and so "
+                   f"cannot be modelled as one. {cov['verdict'].capitalize()}.")
+            (st.error if cov["share"] < 0.3 else st.info)(msg)
+
         explain(
             f"A **tour-visit** is one tour choosing this city, however many "
             f"nights it then plays — so it is not the same as the "
@@ -2090,7 +2220,7 @@ with tab_design:
                 st.warning(
                     f"{drow['city']} is not on the {drow['countryCode']} "
                     f"choice menu — a market needs at least "
-                    f"{whatif.choice.MIN_MARKET_EVENTS} shows and a measured "
+                    f"{whatif.choice.MIN_MARKET_EVENTS_PER_YEAR:g} shows a year and a measured "
                     f"catchment to be somewhere a touring act was realistically "
                     f"weighing. The counting above still stands.")
             else:
@@ -2230,6 +2360,250 @@ with tab_build:
                                             st.column_config.ProgressColumn(
                                                 "share", format="%.2f",
                                                 min_value=0.0, max_value=1.0)})
+
+
+# ======================================================= DID ROOMS WORK ===
+
+with tab_did:
+    st.header("What happened to cities when a room actually opened")
+    st.markdown(
+        "Every other screen compares cities **with each other**, which cannot "
+        "separate a room causing shows from a room being built where shows "
+        "were already expected. This screen compares a city **with its own "
+        "past**: a room opens, and the city is measured against cities where "
+        "nothing opened. Whatever made it attractive was already there the "
+        "year before.")
+
+    l1, l2, l3c, l4 = st.columns(4)
+    with l1:
+        did_cap = st.select_slider(
+            "A room this big counts as an opening",
+            [4_000, 5_000, 6_500, 8_000, 10_000, 12_000, 15_000], value=8_000)
+    with l2:
+        did_outcome = st.radio("Outcome", ["visits", "dates"], horizontal=True,
+                               help="visits: distinct touring acts a year. "
+                                    "dates: individual shows.")
+    with l3c:
+        did_log = st.checkbox("Proportional (log) effect", False,
+                              help="Levels let big cities dominate the "
+                                   "average; logs read as a percentage change.")
+    with l4:
+        did_control = st.radio(
+            "Compare against", ["notyet", "never"], horizontal=True,
+            help="notyet: cities not yet treated, which uses more data. "
+                 "never: only cities that never gained a room.")
+
+    r3 = get_layer3(folder, did_cap, did_outcome, did_log, did_control)
+    span = f"{r3['years'][0]}–{r3['years'][-1]}" if r3["years"] else "?"
+
+    if r3["years"] and (r3["years"][-1] - r3["years"][0]) < 6:
+        st.warning(
+            f"**This extract only spans {span}.** A natural experiment needs "
+            f"years either side of an opening, so pick a longer extract in the "
+            f"sidebar (or build one with "
+            f"`python extract.py --since 2012 --tag since2012`).")
+
+    # --- the design ---------------------------------------------------------
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Treated markets", f"{r3['n_treated']:,}",
+              delta=f"{int(r3['treated']['cohort'].nunique()) if r3['n_treated'] else 0} "
+                    f"opening years", delta_color="off")
+    d2.metric("Control markets", f"{r3['n_control']:,}")
+    d3.metric("Panel", f"{r3['n_markets']:,} × {len(r3['years'])}y",
+              delta=span, delta_color="off")
+    d4.metric("Dropped as unidentifiable", f"{r3['dropped']:,}")
+
+    if r3["n_treated"]:
+        cohorts = (r3["treated"]["cohort"].value_counts().sort_index()
+                   .rename_axis("opening year").reset_index(name="markets"))
+        with st.expander("When the rooms opened, and who was excluded"):
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.dataframe(cohorts.astype({"opening year": int}),
+                             width="stretch", hide_index=True)
+            with cc2:
+                excl = (r3["op"][r3["op"]["cohort"] == -1]["reason"]
+                        .value_counts().rename_axis("why excluded")
+                        .reset_index(name="markets"))
+                st.dataframe(excl, width="stretch", hide_index=True,
+                             column_config={"why excluded":
+                                            st.column_config.TextColumn(
+                                                "why excluded", width="large")})
+            explain(
+                "Treatment is **inferred**: the first year a room of this size "
+                "appears in a market that had none. That is not the same as "
+                "the year it opened — a room can exist for years without "
+                "hosting an act this database tracks.")
+
+    # --- can the inference be checked? -------------------------------------
+    val = r3["val"]
+    if val["checked"]:
+        st.info(
+            f"**The inference can be partly checked.** "
+            f"{val['checked']} venues of this size have a known opening year. "
+            f"{val['within_1yr']:.0%} first appear within a year of opening "
+            f"and {val['within_3yr']:.0%} within three; median gap "
+            f"{val['median_gap']:+.0f} years.")
+    else:
+        st.warning(
+            "**The inference cannot be checked at all at this size.** No venue "
+            "this large has a known opening year in the data, so 'first "
+            "appears' standing in for 'opened' is an assumption carrying the "
+            "whole design, with nothing to test it against.")
+
+    if not r3.get("ok"):
+        st.error(
+            f"**{r3['n_treated']} treated markets is not a design** "
+            f"({L3.MIN_TREATED_FOR_A_DESIGN} is the minimum this will estimate "
+            f"on). No effect is shown, deliberately: a number from a handful "
+            f"of cities would be read as a finding.")
+    else:
+        # --- the event study ------------------------------------------------
+        st.markdown("#### The event study")
+        es = r3["es"].copy()
+        es["period"] = np.where(es["years since opening"] < 0,
+                                "before opening", "after opening")
+        band = alt.Chart(es).mark_circle(opacity=0.9).encode(
+            x=alt.X("years since opening:Q",
+                    title="years since the room opened"),
+            y=alt.Y("effect:Q", title=f"effect ({r3['unit_label']})"),
+            color=alt.Color("period:N", title=None,
+                            scale=alt.Scale(
+                                domain=["before opening", "after opening"],
+                                range=[MUTED, AFTER])),
+            size=alt.Size("treated cities:Q", title="treated cities",
+                          scale=alt.Scale(range=[40, 400])),
+            tooltip=["years since opening", "effect", "cohorts",
+                     "treated cities"])
+        joined = alt.Chart(es).mark_line(color=MUTED, opacity=0.5).encode(
+            x="years since opening:Q", y="effect:Q")
+        zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(
+            color="#7f8c8d").encode(y="y:Q")
+        opening = alt.Chart(pd.DataFrame({"x": [-0.5]})).mark_rule(
+            color="#c0392b", strokeDash=[5, 5]).encode(x="x:Q")
+        st.altair_chart((joined + band + zero + opening).properties(height=360),
+                        width="stretch")
+        explain(
+            "The dashed red line is the opening. **The points to the left of "
+            "it are the whole test.** If treated cities were already pulling "
+            "away before their room opened, the design is measuring selection "
+            "rather than the building, and the points to the right mean "
+            "nothing.")
+
+        # --- the headline ---------------------------------------------------
+        att, pre, dtr = r3["att"], r3["pre"], r3["dt"]
+        st.markdown("#### What it comes to")
+        st.dataframe(pd.DataFrame([
+            {"figure": "Raw post-opening effect",
+             "value": round(att, 2),
+             "what it is": f"Average across all years after opening, in "
+                           f"{r3['unit_label']}"},
+            {"figure": f"Pre-trend over {pre['leads_tested']} lead years",
+             "value": round(pre["mean_pre_effect"], 2),
+             "what it is": "Should be indistinguishable from zero if the "
+                           "design holds. It is not a robustness check — it is "
+                           "the test."},
+            {"figure": "After removing the pre-trend",
+             "value": (round(dtr["detrended_att"], 2)
+                       if dtr.get("ok") else None),
+             "what it is": "Extrapolates the pre-trend across the post period "
+                           "and subtracts it. A sensitivity, not a correction."},
+        ]), width="stretch", hide_index=True,
+            column_config={"what it is": st.column_config.TextColumn(
+                "what it is", width="large")})
+
+        if pre["size"] > 0.5 * abs(att or 1):
+            st.error(
+                f"**Do not read this as causal.** The pre-trend "
+                f"({pre['size']:.2f}) is a large fraction of the effect "
+                f"({att:+.2f}). Treated cities were already moving before "
+                f"their room opened, which is exactly the selection story this "
+                f"design exists to rule out. A Layer 3 result with a visible "
+                f"pre-trend is worth less than the honest Layer 2 range it was "
+                f"meant to replace.")
+        else:
+            st.success(
+                f"**The pre-trend is small relative to the effect** "
+                f"({pre['size']:.2f} against {att:+.2f}), so treated and "
+                f"control cities were moving together before the opening. That "
+                f"is the condition the design needs.")
+
+        # --- robustness -----------------------------------------------------
+        st.markdown("#### Does the answer survive moving the threshold?")
+        rob = get_layer3_robustness(
+            folder, (4_000, 5_000, 6_500, 8_000, 10_000, 12_000, 15_000),
+            did_outcome, did_log, did_control)
+        st.dataframe(
+            rob, width="stretch", hide_index=True,
+            column_config={
+                "room counts as an opening at": st.column_config.NumberColumn(
+                    "opening threshold", format="%d"),
+                "venues with a known opening year to check against":
+                    st.column_config.NumberColumn("checkable venues",
+                                                  format="%d"),
+            })
+        signs = rob["after removing the pre-trend"].dropna()
+        if len(signs) and signs.min() < 0 < signs.max():
+            st.error(
+                "**The detrended effect changes sign across the range of "
+                "thresholds.** Where the cut-off is put decides whether a room "
+                "helps or hurts, which means this design is not identifying an "
+                "effect — it is identifying the cut-off.")
+        explain(
+            "The threshold is a judgement with nothing in the data to fix it, "
+            "so the honest test is whether the answer depends on it.")
+
+        # --- bootstrap ------------------------------------------------------
+        st.markdown("#### How wide is the uncertainty?")
+        reps = st.select_slider("Resamples", [25, 50, 100, 200], value=50,
+                                key="l3_reps")
+        st.caption(f"Roughly {reps * 2.4:.0f} seconds — every resample refits "
+                   f"the whole group-time grid. Cities are resampled, not "
+                   f"city-years, because fifteen years of one city are not "
+                   f"fifteen independent facts.")
+        if st.button("Bootstrap the interval", key="l3_boot"):
+            st.session_state["l3_boot_on"] = True
+        if st.session_state.get("l3_boot_on"):
+            with st.spinner(f"resampling {reps} times"):
+                b = get_layer3_bootstrap(folder, did_cap, did_outcome, did_log,
+                                         did_control, reps)
+            if b:
+                lo, hi = b["overall_ci"]
+                st.metric("90% interval on the overall effect",
+                          f"{lo:+.2f} to {hi:+.2f}",
+                          delta=f"point estimate {att:+.2f}",
+                          delta_color="off")
+                if lo < 0 < hi:
+                    st.warning("**The interval contains zero.** On this "
+                               "evidence the effect is not distinguishable "
+                               "from no effect at all.")
+
+    st.divider()
+    st.markdown("#### What this design can and cannot do")
+    st.dataframe(pd.DataFrame([
+        {"point": "It removes the selection story — if the pre-trend is flat",
+         "detail": "Comparing a city with its own past means whatever made it "
+                   "attractive in the first place is differenced out. That is "
+                   "the one thing Layers 1 and 2 cannot do."},
+        {"point": "Treatment is inferred, not observed",
+         "detail": "'First year a room this size appears' stands in for 'the "
+                   "year it opened'. Wikidata has opening years for a small "
+                   "minority of venues and almost none at arena size, so this "
+                   "assumption mostly cannot be checked."},
+        {"point": "It uses Callaway–Sant'Anna, not two-way fixed effects",
+         "detail": "With staggered openings, TWFE uses already-treated cities "
+                   "as controls and can return the wrong sign even when every "
+                   "individual effect is positive."},
+        {"point": "2020 and 2021 are dropped",
+         "detail": "Every venue shut. A shock hitting treated and control "
+                   "cities identically identifies nothing and would put a "
+                   "crater in the middle of the event study."},
+        {"point": "It still says nothing about money",
+         "detail": "The outcome is touring acts or dates, not tickets, "
+                   "guarantees or whether the building services its debt."},
+    ]), width="stretch", hide_index=True,
+        column_config={"detail": st.column_config.TextColumn("detail",
+                                                             width="large")})
 
 
 # =========================================================== METHOD =======

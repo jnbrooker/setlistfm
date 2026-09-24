@@ -72,11 +72,22 @@ sys.path.insert(0, HERE)
 from catchment import COVERED, EARTH_RADIUS_KM   # noqa: E402
 from gap import latest_extract, load_extract     # noqa: E402
 
-# A market must host this many shows to appear on a menu at all. Candidate
-# cities with three gigs a year are not places a touring act was realistically
-# weighing, and including several hundred of them would dilute every
-# probability in the model toward zero while teaching it nothing.
-MIN_MARKET_EVENTS = 20
+# A market must host shows at this RATE to appear on a menu at all. Candidate
+# cities with a gig a year are not places a touring act was realistically
+# weighing, and including several hundred of them dilutes every probability in
+# the model toward zero while teaching it nothing.
+#
+# A RATE, NOT A COUNT, and that distinction was a real bug. The threshold used
+# to be a flat 20 events. Over a 3.7-year extract that meant 5.4 shows a year --
+# a working market. Over a 14.7-year one the same 20 means 1.4 shows a year, so
+# the Italian menu swelled from 39 markets to 90 and every probability fell,
+# purely because the window got longer. The model was answering a different
+# question at each window length without saying so.
+MIN_MARKET_EVENTS_PER_YEAR = 5.0
+
+# An absolute floor as well, for very short extracts where the rate alone would
+# admit a market on two observations.
+MIN_MARKET_EVENTS_FLOOR = 12
 
 # A tour must have played at least this many cities in the country. Two is the
 # minimum that makes the leave-one-out rule above possible at all: with one
@@ -102,22 +113,96 @@ def pairwise_km(lat, lon):
     return 2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
 
-def candidate_markets(ex, min_events=MIN_MARKET_EVENTS):
+def years_covered(ex):
+    """How long the extract spans, so a rate can be turned into a count."""
+    try:
+        lo, hi = ex["manifest"]["event_date_range"]
+        return max((pd.Timestamp(hi) - pd.Timestamp(lo)).days / 365.25, 0.25)
+    except Exception:
+        return 1.0
+
+
+def candidate_markets(ex, min_events=None,
+                      per_year=MIN_MARKET_EVENTS_PER_YEAR):
     """
     The menu, by country.
 
     Restricted to countries with demographic coverage, because catchment is the
     single most important control and a model fitted where it is missing would
     be attributing to capacity whatever population explains.
+
+    The activity threshold is a rate scaled by the extract's own span, so the
+    menu means the same thing whether the window is four years or fifteen.
+    Passing `min_events` overrides it with a flat count, which is only there
+    for callers that want to reproduce an older run.
     """
     m = ex["markets"].copy()
     m = m[m["countryCode"].isin(COVERED)]
+    if min_events is None:
+        min_events = max(per_year * years_covered(ex), MIN_MARKET_EVENTS_FLOOR)
     m = m[pd.to_numeric(m["events"], errors="coerce").fillna(0) >= min_events]
     cat = f"exclusive_population_{RADIUS_KM}km"
     m = m[pd.to_numeric(m[cat], errors="coerce").fillna(0) > 0]
     m = m.reset_index(drop=True)
     m["market_id"] = np.arange(len(m))
     return m
+
+
+def market_ladders(ex, cand):
+    """
+    Every room capacity in each market, split by kind and sorted.
+
+    WHY THE CEILING ALONE IS NOT ENOUGH
+
+    The model's capacity variables were both derived from the biggest room:
+    `log largest room` and `has a room big enough`. That makes a market whose
+    ONLY room is a 20,000 arena score "big enough" for an act that plays to
+    800 people -- which is plainly wrong. The act cannot fill it and would not
+    book it. The ceiling says what a city can host at most, not whether it can
+    host THIS act well.
+
+    What actually matters is the fit between the act and the ladder of rooms
+    the market has. So the ladder comes through to the choice table, and
+    `best_room` below records the closest rung.
+    """
+    v = ex["venues"].copy()
+    v["capacity"] = pd.to_numeric(v["capacity"], errors="coerce")
+    city_to_market = ex["cities"].set_index(["countryCode", "city"])["market"]
+    v["market"] = pd.MultiIndex.from_arrays(
+        [v["countryCode"], v["city"]]).map(city_to_market)
+    v = v.dropna(subset=["capacity", "market"])
+    io = v["outside_inside"].astype(str).str.lower().str.strip()
+
+    out = {}
+    for (mk, cc), g in v.groupby(["market", "countryCode"]):
+        gi = io.loc[g.index]
+        out[(cc, mk)] = {
+            "indoor": np.sort(g.loc[gi == "inside", "capacity"].values),
+            "outdoor": np.sort(g.loc[gi == "outside", "capacity"].values),
+            "either": np.sort(g["capacity"].values),
+        }
+    return out
+
+
+def nearest_room(ladder, need, kind):
+    """
+    The rung closest to what the act plays, measured in LOG capacity.
+
+    Log distance because the gap between 1,000 and 2,000 seats matters far more
+    than between 41,000 and 42,000 -- the same reasoning as the venue-level
+    assignment rule. Falls back to every room when the market has none of the
+    matching kind, which is the generous reading used throughout.
+    """
+    if ladder is None or need is None or not np.isfinite(need):
+        return np.nan
+    arr = ladder.get(kind if kind in ("indoor", "outdoor") else "either")
+    if arr is None or not len(arr):
+        arr = ladder.get("either")
+    if arr is None or not len(arr):
+        return np.nan
+    i = int(np.argmin(np.abs(np.log(np.clip(arr, 50, None))
+                             - np.log(max(float(need), 50)))))
+    return float(arr[i])
 
 
 def tour_market_visits(ex, cand):
@@ -150,7 +235,7 @@ def tour_market_visits(ex, cand):
     return g.dropna(subset=["market_id"]).astype({"market_id": int})
 
 
-def build(ex, min_cities=MIN_CITIES, min_market_events=MIN_MARKET_EVENTS,
+def build(ex, min_cities=MIN_CITIES, min_market_events=None,
           countries=None, progress=True):
     """
     Assemble the full (occasion x alternative) table.
@@ -165,6 +250,7 @@ def build(ex, min_cities=MIN_CITIES, min_market_events=MIN_MARKET_EVENTS,
         cand["market_id"] = np.arange(len(cand))
     visits = tour_market_visits(ex, cand)
     visits = visits[visits["countryCode"].isin(set(cand["countryCode"]))]
+    ladders = market_ladders(ex, cand)
 
     tour_meta = ex["tours"].set_index("tour")[["headliner", "category"]]
 
@@ -188,6 +274,7 @@ def build(ex, min_cities=MIN_CITIES, min_market_events=MIN_MARKET_EVENTS,
         ceil_any = pd.to_numeric(menu["largest_venue_capacity"],
                                  errors="coerce").values
         market_events = pd.to_numeric(menu["events"], errors="coerce").values
+        menu_lads = [ladders.get((code, m)) for m in menu["city"].values]
 
         here = visits[visits["countryCode"] == code]
         n_done = 0
@@ -244,6 +331,13 @@ def build(ex, min_cities=MIN_CITIES, min_market_events=MIN_MARKET_EVENTS,
                 kind = "indoor" if oi > oo else ("outdoor" if oo > oi else "either")
                 ceiling = {"indoor": ceil_in, "outdoor": ceil_out}.get(kind, ceil_any)
 
+                # The closest rung in each market to what this act plays.
+                # Recomputed per occasion because `room_needed` is
+                # leave-one-out and therefore differs between a tour's own
+                # stops.
+                best = np.array([nearest_room(L, room_needed, kind)
+                                 for L in menu_lads])
+
                 frames.append(pd.DataFrame({
                     "tour": tour,
                     "countryCode": code,
@@ -254,6 +348,7 @@ def build(ex, min_cities=MIN_CITIES, min_market_events=MIN_MARKET_EVENTS,
                     "catchment": catchment[avail],
                     "income": income[avail],
                     "ceiling": ceiling[avail],
+                    "best_room": best[avail],
                     "ceiling_indoor": ceil_in[avail],
                     "market_events": market_events[avail],
                     "routing_km": routing[avail],
@@ -308,7 +403,8 @@ def main():
     ap.add_argument("--extract", default=None)
     ap.add_argument("--countries", nargs="*", default=None)
     ap.add_argument("--min-cities", type=int, default=MIN_CITIES)
-    ap.add_argument("--min-market-events", type=int, default=MIN_MARKET_EVENTS)
+    ap.add_argument("--min-market-events", type=int, default=None,
+                    help="flat event count instead of the per-year rate")
     a = ap.parse_args()
 
     ex = load_extract(a.extract or latest_extract())

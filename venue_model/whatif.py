@@ -185,7 +185,7 @@ def _target_mask(menu, market):
     if not t.any():
         raise KeyError(
             f"{market!r} is not on the {menu['countryCode']} menu. A market "
-            f"needs {choice.MIN_MARKET_EVENTS} shows and a measured catchment "
+            f"needs {choice.MIN_MARKET_EVENTS_PER_YEAR:g} shows a year and a measured catchment "
             f"to be somewhere a touring act was realistically weighing.")
     return t.values
 
@@ -203,6 +203,22 @@ def _rebuilt_utility(menu, spec, target, applies, capacity):
     sub = rows.loc[applies].copy()
     sub["ceiling"] = np.maximum(
         pd.to_numeric(sub["ceiling"], errors="coerce").fillna(0.0), float(capacity))
+
+    # THE NEW ROOM JOINS THE LADDER, not just the ceiling.
+    #
+    # Without this, a proposed 20,000 arena and a proposed 3,000 hall would
+    # score identically for an act that plays 3,000 -- both raise the ceiling
+    # past its bar, and nothing else would move. The whole point of carrying
+    # the ladder is that a RIGHT-SIZED room helps more than an oversized one,
+    # and that only shows up if the counterfactual can make the new room the
+    # closest rung.
+    if "best_room" in sub:
+        need = pd.to_numeric(sub["room_needed"], errors="coerce").clip(lower=50)
+        old = pd.to_numeric(sub["best_room"], errors="coerce")
+        d_old = (np.log(old.clip(lower=50)) - np.log(need)).abs()
+        d_new = (np.log(max(float(capacity), 50.0)) - np.log(need)).abs()
+        sub["best_room"] = np.where(d_new < d_old.fillna(np.inf),
+                                    float(capacity), old)
     X_sub, _ = layer2.design(sub, spec, s["consts"])
 
     v_after = s["v"].copy()

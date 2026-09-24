@@ -1,0 +1,812 @@
+<title>Why Tours Skip Your City</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    color-scheme: light;
+    --ground:#f4f5f2; --raised:#fbfbf9; --sunk:#eceee9;
+    --ink:#191d1b; --ink-2:#4a524e; --slate:#6f7873; --rule:#dbdfd8;
+    --pine:#2f6f5e; --pine-soft:#dceae4;
+    --ember:#c4632f; --ember-soft:#f6e3d6;
+    --warn:#8a5a12; --warn-soft:#f7ecd5;
+    --bad:#a13d2d;
+    --display:"Fraunces",Georgia,serif;
+    --body:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+    color-scheme: dark;
+    --ground:#121614; --raised:#1a201d; --sunk:#0d100f;
+    --ink:#eaefea; --ink-2:#b3bdb7; --slate:#8b958f; --rule:#2c3531;
+    --pine:#63b79c; --pine-soft:#1d332c;
+    --ember:#e08a52; --ember-soft:#3a2418;
+    --warn:#d9a84e; --warn-soft:#332715; --bad:#e2705c;
+  }}
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --ground:#121614; --raised:#1a201d; --sunk:#0d100f;
+    --ink:#eaefea; --ink-2:#b3bdb7; --slate:#8b958f; --rule:#2c3531;
+    --pine:#63b79c; --pine-soft:#1d332c;
+    --ember:#e08a52; --ember-soft:#3a2418;
+    --warn:#d9a84e; --warn-soft:#332715; --bad:#e2705c;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--ground);color:var(--ink);font-family:var(--body);
+       font-size:16px;line-height:1.62;margin:0;padding-inline:20px;padding-block:0}
+  .wrap{max-width:1120px;margin:0 auto}
+  .col{max-width:65ch;margin-inline:auto}
+  h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0}
+  h1{font-size:clamp(2.1rem,6vw,3.5rem);line-height:1.03;font-weight:600;letter-spacing:-.022em}
+  h2{font-size:clamp(1.45rem,3.4vw,2.05rem);font-weight:600;line-height:1.14;margin-block:0 .7rem}
+  h3{font-size:1.02rem;font-weight:600;margin-block:1.4rem .3rem;font-family:var(--body)}
+  p{margin-block:0 1rem}
+  .eyebrow{font-family:var(--mono);font-size:.69rem;letter-spacing:.15em;
+           text-transform:uppercase;color:var(--slate);margin-block:0 .7rem}
+  .lede{font-size:1.15rem;color:var(--ink-2)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  header.hero{padding-block:clamp(3rem,9vw,5.5rem) 2.2rem;border-bottom:1px solid var(--rule)}
+  section{padding-block:clamp(2.6rem,6vw,4.2rem)}
+  section+section{border-top:1px solid var(--rule)}
+
+  .panel{background:var(--raised);border:1px solid var(--rule);border-radius:3px;
+         padding:clamp(1rem,3vw,1.7rem);margin-block:1.6rem}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:flex-end;margin-block:0 1.4rem}
+  .ctl{flex:1 1 210px;min-width:0}
+  .ctl.tight{flex:0 1 auto}
+  label,.lbl{display:block;font-family:var(--mono);font-size:.68rem;letter-spacing:.11em;
+             text-transform:uppercase;color:var(--slate);margin-block:0 .4rem}
+  input[type=range]{width:100%;accent-color:var(--ember);margin:0}
+  .readout{font-family:var(--mono);font-size:1.45rem;font-weight:500;line-height:1.1}
+  .seg{display:inline-flex;border:1px solid var(--rule);border-radius:2px;overflow:hidden;flex-wrap:wrap}
+  .seg button{font-family:var(--mono);font-size:.76rem;padding:.48rem .8rem;border:0;
+              cursor:pointer;background:var(--raised);color:var(--ink-2)}
+  .seg button[aria-pressed=true]{background:var(--pine);color:#fff}
+  .seg button:focus-visible{outline:2px solid var(--ember);outline-offset:-2px}
+
+  .rows{display:flex;flex-direction:column;gap:.4rem}
+  .row{display:grid;grid-template-columns:5.4rem 1fr 7rem;gap:.6rem;align-items:center;
+       cursor:pointer;border-radius:2px}
+  .row:hover{background:var(--sunk)}
+  .row[aria-selected=true]{background:var(--sunk);outline:1px solid var(--rule)}
+  .row .name{font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:.3rem}
+  .row.target .name{font-weight:600;color:var(--ember)}
+  .track{position:relative;height:19px;background:var(--pine-soft);border-radius:2px;overflow:hidden}
+  .bar{position:absolute;inset:0 auto 0 0;background:var(--pine);transition:width .18s ease}
+  .row.target .track{background:var(--ember-soft)} .row.target .bar{background:var(--ember)}
+  .ghost{position:absolute;top:0;bottom:0;width:2px;background:var(--ink);opacity:.5}
+  .vals{font-family:var(--mono);font-size:.76rem;text-align:right;white-space:nowrap;padding-right:.3rem}
+  .delta{font-size:.7rem} .up{color:var(--ember)} .down{color:var(--slate)}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:1rem;margin-block:1.4rem 0}
+  .stat{border-top:2px solid var(--pine);padding-top:.55rem}
+  .stat.alt{border-top-color:var(--ember)}
+  .stat .k{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--slate)}
+  .stat .v{font-family:var(--mono);font-size:1.3rem;font-weight:500}
+
+  .formula{font-family:var(--mono);font-size:.88rem;background:var(--sunk);
+           border-left:3px solid var(--pine);padding:.95rem 1.1rem;overflow-x:auto;
+           margin-block:1.2rem;color:var(--ink-2)}
+  .note{font-size:.85rem;color:var(--slate);margin-block:.8rem 0}
+  figure{margin:0} .chartbox{overflow-x:auto}
+  svg{display:block;max-width:100%;height:auto}
+  .cap{font-size:.83rem;color:var(--slate);margin-block:.6rem 0}
+
+  table{border-collapse:collapse;width:100%;font-size:.87rem}
+  .tablebox{overflow-x:auto;margin-block:1rem}
+  th,td{text-align:left;padding:.48rem .65rem;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-family:var(--mono);font-size:.66rem;letter-spacing:.09em;text-transform:uppercase;
+     color:var(--slate);font-weight:400}
+  td.n{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+
+  .callout{background:var(--warn-soft);border-left:3px solid var(--warn);
+           padding:.95rem 1.1rem;margin-block:1.2rem;font-size:.91rem}
+  .callout strong{color:var(--warn)}
+  .layers{display:flex;flex-direction:column;gap:.5rem;margin-block:1.5rem}
+  .layer{background:var(--raised);border:1px solid var(--rule);border-left:4px solid var(--pine);border-radius:2px}
+  .layer[data-live=no]{border-left-color:var(--slate)}
+  .layer summary{padding:.8rem 1.05rem;cursor:pointer;display:flex;gap:.8rem;align-items:baseline;list-style:none}
+  .layer summary::-webkit-details-marker{display:none}
+  .layer summary:focus-visible{outline:2px solid var(--ember);outline-offset:-2px}
+  .layer .n{font-family:var(--mono);font-size:.7rem;color:var(--slate)}
+  .layer .t{font-weight:600;flex:1 1 auto}
+  .layer .says{font-family:var(--mono);font-size:.68rem;color:var(--slate)}
+  .layer .body{padding:0 1.05rem 1.05rem;font-size:.91rem;color:var(--ink-2)}
+  .layer .body p:last-child{margin-bottom:0}
+
+  /* DiD grid */
+  .grid{display:grid;gap:3px;font-family:var(--mono);font-size:.64rem;overflow-x:auto}
+  .cell{height:26px;border-radius:2px;display:flex;align-items:center;justify-content:center;
+        color:var(--slate);background:var(--sunk)}
+  .cell.pre{background:var(--sunk)}
+  .cell.post{background:var(--pine);color:#fff}
+  .cell.ctl{background:var(--pine-soft);color:var(--pine)}
+  .cell.bad{background:var(--bad);color:#fff}
+  .glabel{font-family:var(--mono);font-size:.68rem;color:var(--slate);display:flex;
+          align-items:center;white-space:nowrap;padding-right:.4rem}
+  .key{display:flex;flex-wrap:wrap;gap:.9rem;font-family:var(--mono);font-size:.68rem;
+       color:var(--slate);margin-block:.9rem 0}
+  .key i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:.35rem;vertical-align:-1px}
+  footer{border-top:1px solid var(--rule);padding-block:2rem 3rem;font-size:.83rem;color:var(--slate)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+  @media (max-width:560px){
+    .row{grid-template-columns:4.4rem 1fr;row-gap:.1rem}
+    .vals{grid-column:2;text-align:left;padding-left:.3rem}
+  }
+</style>
+
+<div class="wrap">
+
+<header class="hero"><div class="col">
+  <p class="eyebrow">A model of touring decisions &middot; setlist.fm + Pollstar</p>
+  <h1>Why tours skip your city</h1>
+  <p class="lede">A city wants to know whether building an arena would bring more shows.
+  The question is <em>causal</em>; the only evidence is what promoters already did. This is
+  how the model bridges that gap, what it can prove, and exactly where it stops.</p>
+</div></header>
+
+<!-- ============ 1. THE MENU ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part one &middot; the mechanism</p>
+    <h2>Cities compete for the same night</h2>
+    <p>When a tour books four Italian dates it is not grading each city on its own merits.
+    It is picking from a menu, and the cities on that menu are rivals. So the model is a
+    <strong>conditional logit</strong>: every city gets a score built from its attributes,
+    and those scores become probabilities that must sum to one.</p>
+    <div class="formula">P(city j) = e^(x&#106;'&beta;) &divide; &Sigma;&#8341; e^(x&#8342;'&beta;)&nbsp;&nbsp;&nbsp;over every city k on the menu</div>
+    <p>The denominator does the work. Because the probabilities are forced to add to one,
+    <strong>a city can only gain by taking from the others</strong>. There is no way for
+    everyone to win, which is exactly right: a tour has a fixed number of nights.</p>
+    <p>Below are ten real Italian markets with their real catchments and ceilings, scored
+    with the real fitted coefficients. <strong>Click any city</strong> to see its score
+    pulled apart term by term.</p>
+  </div>
+
+  <div class="panel">
+    <div class="controls">
+      <div class="ctl">
+        <label for="cap">Bari's biggest indoor room</label>
+        <input type="range" id="cap" min="2000" max="30000" step="500" value="10836">
+        <div class="readout"><span id="capOut" class="num">10,836</span>
+          <span style="font-size:.78rem;color:var(--slate)">seats</span></div>
+      </div>
+      <div class="ctl tight">
+        <span class="lbl">Specification</span>
+        <div class="seg" id="spec" role="group">
+          <button data-spec="A" aria-pressed="true">A</button>
+          <button data-spec="B" aria-pressed="false">B</button>
+        </div>
+      </div>
+      <div class="ctl tight">
+        <span class="lbl">The act plays rooms of</span>
+        <div class="seg" id="need" role="group">
+          <button data-need="3500" aria-pressed="false">3,500</button>
+          <button data-need="10000" aria-pressed="false">10,000</button>
+          <button data-need="18000" aria-pressed="true">18,000</button>
+        </div>
+      </div>
+    </div>
+    <div class="rows" id="rows"></div>
+    <div class="stats">
+      <div class="stat alt"><div class="k">Bari's chance</div><div class="v num" id="sBari">&mdash;</div></div>
+      <div class="stat"><div class="k">Taken from the rest</div><div class="v num" id="sTaken">&mdash;</div></div>
+      <div class="stat"><div class="k">Biggest loser</div><div class="v num" id="sLoser" style="font-size:1.02rem">&mdash;</div></div>
+      <div class="stat"><div class="k">Menu total</div><div class="v num" id="sTotal">100.0%</div></div>
+    </div>
+    <div id="breakdown" style="margin-top:1.4rem"></div>
+    <p class="note">Bars show current probability; the dark tick marks where Bari began.
+    Routing is held equal across cities so the room's effect is visible alone &mdash; in the
+    real model, distance to the tour's other dates moves these numbers too.</p>
+  </div>
+
+  <div class="col">
+    <h3>Why everything about the artist disappears</h3>
+    <p>Look at the formula again. The numerator and denominator both contain the artist.
+    Their popularity, budget, booking agent and fanbase are <em>identical whichever city
+    they choose</em>, so they cancel completely out of the ratio.</p>
+    <p>That sounds like throwing away information. It is the single best property of the
+    model. It means the coefficients are identified from <strong>within-tour</strong>
+    variation only: not &ldquo;do big acts play big cities&rdquo; &mdash; obviously they do &mdash;
+    but <em>given that this tour played four Italian cities, why those four and not the
+    other thirty</em>. Every confounder attached to the act is differenced away without
+    anyone having to measure it.</p>
+    <p>The price is that an artist trait can only enter by being <strong>interacted</strong>
+    with a city trait. That is why the model carries a term for
+    <span class="num">room big enough &times; act size</span>: it asks whether capacity
+    binds harder for bigger acts. Switch the act above to 18,000 and then to 3,500, and
+    watch how much the room matters in each case.</p>
+  </div>
+</section>
+
+<!-- ============ 2. THE CONFOUND ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part two &middot; the difficulty</p>
+    <h2>Arenas get built where the demand already was</h2>
+    <p>Here is the problem that makes this hard. Plot every European market's show count
+    against the size of its biggest indoor room and you get a strong, clean relationship.
+    It is tempting to read the slope as &ldquo;what a bigger room buys you&rdquo;.</p>
+    <p>It is not. Cities that <em>build</em> arenas are cities where promoters already
+    expected demand. The room and the shows have a common cause, and the slope contains
+    both. <strong>Press the button</strong> to hold catchment constant and watch what
+    happens to it.</p>
+  </div>
+
+  <figure class="panel">
+    <div class="controls" style="margin-bottom:1rem">
+      <div class="ctl tight">
+        <div class="seg" id="ctlToggle" role="group">
+          <button data-ctl="raw" aria-pressed="true">Raw relationship</button>
+          <button data-ctl="adj" aria-pressed="false">Holding catchment constant</button>
+        </div>
+      </div>
+    </div>
+    <div class="chartbox"><svg viewBox="0 0 760 380" role="img"
+      aria-label="Scatter of shows against indoor capacity for 70 European markets, with a fitted line that flattens when catchment is held constant."><g id="sc"></g></svg></div>
+    <figcaption class="cap" id="scCap">Each dot is a market. The line is the fitted slope.</figcaption>
+    <div class="stats">
+      <div class="stat"><div class="k">Slope, raw</div><div class="v num">+0.571</div></div>
+      <div class="stat alt"><div class="k">Holding catchment constant</div><div class="v num">+0.253</div></div>
+      <div class="stat"><div class="k">Removed by one control</div><div class="v num">56%</div></div>
+      <div class="stat"><div class="k">Markets</div><div class="v num">203</div></div>
+    </div>
+  </figure>
+
+  <div class="col">
+    <p><strong>One control removes 56% of it.</strong> And catchment is only the most
+    obvious confounder &mdash; a strong local promoter, a university, a motorway junction and
+    a habit of selling out are all unmeasured and all point the same way.</p>
+    <p>So the model is fitted twice, and the honest answer is the interval between:</p>
+    <div class="tablebox"><table>
+      <thead><tr><th>Variable</th><th class="n">Spec A</th><th class="n">Spec B</th><th>What the gap tells you</th></tr></thead>
+      <tbody>
+        <tr><td>log catchment</td><td class="n">1.75</td><td class="n">0.40</td><td>Most of it was really past activity</td></tr>
+        <tr><td>log largest room</td><td class="n">0.33</td><td class="n">0.01</td><td><strong>Collapses to nothing</strong></td></tr>
+        <tr><td>has a room big enough</td><td class="n">0.39</td><td class="n">0.28</td><td><strong>Survives</strong></td></tr>
+        <tr><td>room big enough &times; act size</td><td class="n">0.06</td><td class="n">0.08</td><td>Binds harder for bigger acts</td></tr>
+      </tbody>
+    </table></div>
+    <p><strong>A</strong> lets capacity keep credit for every unobserved reason a city is
+    attractive, so it is an <em>upper bound</em>. <strong>B</strong> adds how many shows the
+    city already hosts &mdash; the best available proxy for those unobserved reasons, but also
+    partly <em>the thing capacity delivers</em> &mdash; so it is a <em>lower bound</em>. The truth
+    sits between. This data cannot say where.</p>
+    <div class="callout"><strong>The row that survives is the finding.</strong> General
+    size is explained away by how busy a city already was, which is what you would expect
+    if it were mostly selection. Whether the room clears <em>this particular act's</em> bar
+    is not explained away. That distinction is the whole reason the model asks about a
+    threshold rather than about size.</div>
+  </div>
+</section>
+
+<!-- ============ 3. CATCHMENT ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part three &middot; a trap worth seeing</p>
+    <h2>The 13.8 million people who were not there</h2>
+    <p>Catchment is the most important control in the model, so measuring it badly poisons
+    everything. The obvious measure &mdash; count everyone within 60&nbsp;km &mdash; is badly wrong,
+    and wrong in a way that looks perfectly reasonable.</p>
+    <p>A 60&nbsp;km circle around Guildford contains 13.8 million people, because London is
+    forty kilometres up the road. Ranked that way, Guildford is one of the most
+    under-served markets in Europe. It is not. It is a suburb of the best-served one.</p>
+  </div>
+  <div class="panel">
+    <div class="controls" style="margin-bottom:1.1rem">
+      <div class="ctl tight">
+        <span class="lbl">Market</span>
+        <div class="seg" id="catPick" role="group">
+          <button data-i="0" aria-pressed="true">Guildford</button>
+          <button data-i="1" aria-pressed="false">Hanley</button>
+          <button data-i="2" aria-pressed="false">Manchester</button>
+          <button data-i="3" aria-pressed="false">London</button>
+          <button data-i="4" aria-pressed="false">Bari</button>
+        </div>
+      </div>
+    </div>
+    <div class="chartbox"><svg viewBox="0 0 760 210" role="img"
+      aria-label="Bars comparing a market's raw 60km population against the population for which it is the nearest market hosting shows."><g id="cat"></g></svg></div>
+    <p class="note" id="catNote"></p>
+  </div>
+  <div class="col">
+    <p>The fix is a <strong>Voronoi allocation</strong>: assign every postcode district to
+    the single nearest market that actually hosts shows, then add them up. Nobody is
+    counted twice, and a town in a big city's shadow keeps only the people for whom it
+    genuinely is the closest option.</p>
+    <p>It is the simplest defensible model of competition and it explains in one sentence:
+    people go to their nearest market. A gravity model would capture that a bigger city
+    pulls from further away, at the cost of a distance-decay parameter nobody can observe
+    and a number no reader could check by hand. Not worth it here.</p>
+    <p>The known cost, stated rather than hidden: this <em>understates</em> big cities
+    slightly and <em>overstates</em> small ones, because people do sometimes travel past a
+    small market to reach a large one. Both figures are kept so either reading is
+    available.</p>
+  </div>
+</section>
+
+<!-- ============ 4. LAYERS ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part four &middot; how far each number reaches</p>
+    <h2>Four layers, kept deliberately apart</h2>
+    <p>Each layer is more ambitious and less certain than the one below. They are never
+    mixed into a single figure, so you can always see how far out on the limb any given
+    number sits.</p>
+  </div>
+  <div class="col layers">
+    <details class="layer" open><summary><span class="n">01</span><span class="t">Counting</span><span class="says">&ldquo;what happens today&rdquo;</span></summary>
+      <div class="body"><p>The capacity ladder, which tours skipped a city, whether room
+      size was actually the obstacle, and how the city compares with others of its size.
+      No model at all &mdash; every figure is a count, a maximum or a median of something that
+      really happened.</p>
+      <p>Probably most of the value. If the descriptive picture shows no gap, nothing
+      above it will manufacture one.</p></div></details>
+    <details class="layer"><summary><span class="n">02</span><span class="t">The choice model</span><span class="says">&ldquo;this associates with that&rdquo;</span></summary>
+      <div class="body"><p>The conditional logit above, fitted on 65,288 choice occasions
+      from 6,690 tours across seven countries, with standard errors clustered by tour.</p>
+      <p>It genuinely predicts. On tours held out of the fitting, it ranks the real choice
+      first <strong>38.8%</strong> of the time against a <strong>1.7%</strong> random
+      baseline, on menus averaging 58 cities &mdash; and out-of-sample fit (0.320) barely
+      trails in-sample (0.329), so it is not overfitting.</p>
+      <p>It still cannot say a room <em>causes</em> shows.</p></div></details>
+    <details class="layer"><summary><span class="n">03</span><span class="t">The natural experiment</span><span class="says">&ldquo;this caused that&rdquo;</span></summary>
+      <div class="body"><p>Stop comparing cities with each other; compare a city with its
+      own past. 46 markets gained a room of 8,000+ between 2014 and 2024. What happened to
+      them, measured against cities where nothing opened?</p>
+      <p>Whatever made a city attractive was already there the year before its arena
+      opened, so the selection story has no purchase on this comparison &mdash; provided the
+      two groups were moving together beforehand. Testing that is the next section.</p></div></details>
+    <details class="layer" data-live="no"><summary><span class="n">04</span><span class="t">Simulation</span><span class="says">&ldquo;here is the spread&rdquo;</span></summary>
+      <div class="body"><p>Redrawing the coefficients from their covariance to put a band
+      on any figure. Worth having, and the <em>narrowest</em> uncertainty in the project: it
+      covers sampling error only, not whether capacity causes anything. A tight band here
+      means the sample is large, not that the answer is safe.</p></div></details>
+  </div>
+</section>
+
+<!-- ============ 5. STAGGERED DID ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part five &middot; getting the experiment right</p>
+    <h2>Why the obvious estimator gives the wrong answer</h2>
+    <p>Arenas do not all open in the same year, and that innocuous fact breaks the standard
+    tool. The usual approach &mdash; a regression with city and year fixed effects &mdash; quietly
+    compares <em>every</em> pair of cities, including pairs where the &ldquo;control&rdquo;
+    is a city that already got its arena.</p>
+    <p>If the effect of a room grows over time, those comparisons subtract a rising trend
+    that is itself a treatment effect. The estimate is dragged down &mdash; and can even flip
+    sign while every individual effect is positive.</p>
+    <p><strong>Toggle below</strong> to see which cells each method is willing to use as a
+    control.</p>
+  </div>
+  <figure class="panel">
+    <div class="controls" style="margin-bottom:1.1rem">
+      <div class="ctl tight">
+        <div class="seg" id="didToggle" role="group">
+          <button data-m="cs" aria-pressed="true">Callaway&ndash;Sant'Anna</button>
+          <button data-m="twfe" aria-pressed="false">Two-way fixed effects</button>
+        </div>
+      </div>
+    </div>
+    <div id="didGrid"></div>
+    <div class="key">
+      <span><i style="background:var(--sunk);border:1px solid var(--rule)"></i>before its room opened</span>
+      <span><i style="background:var(--pine)"></i>after its room opened</span>
+      <span><i style="background:var(--pine-soft)"></i>used as a control</span>
+      <span><i style="background:var(--bad)"></i>used as a control <strong>despite already being treated</strong></span>
+    </div>
+    <figcaption class="cap" id="didCap"></figcaption>
+    <div class="stats">
+      <div class="stat"><div class="k">True effect (simulated)</div><div class="v num">+4.00</div></div>
+      <div class="stat alt"><div class="k">Callaway&ndash;Sant'Anna</div><div class="v num">+4.25</div></div>
+      <div class="stat"><div class="k">TWFE, constant effect</div><div class="v num">+4.11</div></div>
+      <div class="stat"><div class="k">TWFE, growing effect</div><div class="v num" style="color:var(--bad)">+6.87</div></div>
+    </div>
+  </figure>
+  <div class="col">
+    <p class="note">Figures from a simulation with a known answer, built to test the
+    estimator. With a constant effect both methods are fine. With an effect that
+    <em>grows</em> after opening &mdash; the realistic case &mdash; the group-time estimator returns
+    <span class="num">+9.21</span> against TWFE's <span class="num">+6.87</span>. The bias
+    is not small and it is not random; it is structural.</p>
+  </div>
+</section>
+
+<!-- ============ 6. EVENT STUDY ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part six &middot; what actually happened</p>
+    <h2>46 cities that gained a room</h2>
+    <p>Each bar is the effect on a city's tour-visits, by years since its room opened,
+    against cities where nothing opened. <strong>The bars left of zero are the test that
+    decides everything.</strong></p>
+    <p>The whole design rests on an assumption that cannot be checked directly: absent the
+    new room, treated and control cities would have moved in parallel. What <em>can</em> be
+    checked is whether they were moving in parallel beforehand. If treated cities were
+    already pulling away, the room was built because the city was taking off &mdash; and that
+    is the selection story all over again.</p>
+  </div>
+  <figure class="panel">
+    <div class="chartbox"><svg viewBox="0 0 760 330" role="img"
+      aria-label="Event study of the effect on tour-visits by years since a room opened, with a fitted pre-trend line."><g id="es"></g></svg></div>
+    <div class="controls" style="margin:1rem 0 0">
+      <div class="ctl tight">
+        <div class="seg" id="trendToggle" role="group">
+          <button data-trend="off" aria-pressed="true">Raw effect</button>
+          <button data-trend="on" aria-pressed="false">Pre-trend removed</button>
+        </div>
+      </div>
+    </div>
+    <figcaption class="cap" id="esCap"></figcaption>
+  </figure>
+  <div class="col">
+    <div class="stats">
+      <div class="stat"><div class="k">Raw effect</div><div class="v num">+2.49</div></div>
+      <div class="stat alt"><div class="k">Pre-trend removed</div><div class="v num">+1.27</div></div>
+      <div class="stat"><div class="k">90% interval</div><div class="v num" style="font-size:1rem">+0.82 to +3.87</div></div>
+      <div class="stat"><div class="k">Treated markets</div><div class="v num">46</div></div>
+    </div>
+    <p style="margin-top:1.2rem">Extra tour-visits a year. The leads are <em>not</em> flat:
+    treated cities were already gaining <span class="num">+0.34</span> visits a year before
+    their rooms opened, so roughly half the raw effect was a trend already running.</p>
+    <p>Removing it is a <strong>sensitivity, not a correction</strong>. Extrapolating the
+    pre-trend assumes it would have continued &mdash; exactly as unverifiable as the
+    parallel-trends assumption it patches. Read <span class="num">+1.27</span> and
+    <span class="num">+2.49</span> as the two ends of a range, and note that the whole
+    range sits at the <em>bottom</em> of what Layer 2 alone would have suggested. That is
+    what you would expect if the cross-section was inflated by selection &mdash; and it is the
+    closest thing here to a result confirming itself.</p>
+  </div>
+</section>
+
+<!-- ============ 7. LIMITS ============ -->
+<section>
+  <div class="col">
+    <p class="eyebrow">Part seven</p>
+    <h2>What it cannot see</h2>
+    <div class="tablebox"><table>
+      <thead><tr><th>Blind spot</th><th>Consequence</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Half the calendar</strong></td><td>Only multi-city tours involve a choice between cities. A one-off local gig had no menu, so there is nothing to model. Across Italy that is <strong>49%</strong> of shows &mdash; 61% in Bari, 9% in Sanremo, whose year is one festival.</td></tr>
+        <tr><td><strong>The building itself</strong></td><td>Sightlines, loading bays, rail links, the promoter and the rent are invisible. A better room of the same capacity scores identically.</td></tr>
+        <tr><td><strong>A second room the same size</strong></td><td>The model works through the ceiling, so it registers as nothing at all. Date congestion is real and unseen.</td></tr>
+        <tr><td><strong>Which room inside a city</strong></td><td>The choice set is cities. Splitting a city between its rooms needs an extra assumption that holds in Bari (76% accurate) and fails in Milan (11%, worse than guessing).</td></tr>
+        <tr><td><strong>What a venue earns</strong></td><td>Ticket data gives <strong>gross box office</strong> &mdash; what the audience pays. The hire fee and ancillaries need a rate card this database does not have.</td></tr>
+        <tr><td><strong>When a room opened</strong></td><td>Capacity is recorded once, as each market's biggest-ever room. On a long window that is anachronistic, and it pushes the capacity coefficient toward zero.</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<footer><div class="col">
+  Layer 2 fitted on 65,288 choice occasions from 6,690 tours across DE &middot; GB &middot; FR &middot; IT &middot; ES &middot; PT &middot; CH.
+  Layer 3 on a 2012&ndash;2026 panel of 921 markets. 2020 and 2021 are excluded: every venue shut,
+  and a shock that hits all cities identically identifies nothing.
+</div></footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var SCAT=[{"c":"London","e":6522,"k":20000,"p":8.03},{"c":"Paris","e":2888,"k":45000,"p":12.55},{"c":"Manchester","e":2216,"k":23500,"p":3.33},{"c":"Berlin","e":2128,"k":18000,"p":4.48},{"c":"Madrid","e":1776,"k":17453,"p":4.34},{"c":"Glasgow","e":1581,"k":14300,"p":2.42},{"c":"Milan","e":1381,"k":23400,"p":6.23},{"c":"Barcelona","e":1362,"k":18411,"p":3.38},{"c":"Cologne","e":1306,"k":20000,"p":2.15},{"c":"Hamburg","e":1242,"k":15000,"p":3.46},{"c":"Munich","e":1027,"k":15500,"p":3.11},{"c":"Birmingham","e":977,"k":16094,"p":2.04},{"c":"Bristol","e":908,"k":3851,"p":0.94},{"c":"Sant Josep de sa Talaia","e":845,"k":3000,"p":0.17},{"c":"Zurich","e":793,"k":15000,"p":1.67},{"c":"Leeds","e":665,"k":13781,"p":0.82},{"c":"Rome","e":662,"k":11500,"p":4.68},{"c":"Frankfurt","e":604,"k":15000,"p":1.85},{"c":"Brighton","e":589,"k":5532,"p":0.84},{"c":"Liverpool","e":513,"k":11000,"p":1.86},{"c":"Belfast","e":485,"k":10800,"p":1.42},{"c":"Nottingham","e":481,"k":10993,"p":1.13},{"c":"Stuttgart","e":447,"k":15500,"p":3.65},{"c":"Lisbon","e":445,"k":20000,"p":2.29},{"c":"Newcastle upon Tyne","e":442,"k":11059,"p":1.22},{"c":"Cardiff","e":418,"k":7500,"p":1.13},{"c":"Lyon","e":402,"k":17000,"p":2.34},{"c":"Leipzig","e":353,"k":12552,"p":1.48},{"c":"Valencia","e":346,"k":18600,"p":1.92},{"c":"Edinburgh","e":320,"k":6000,"p":1.38},{"c":"Hanover","e":303,"k":14000,"p":1.93},{"c":"Lille","e":284,"k":7000,"p":3.04},{"c":"Seville","e":282,"k":7143,"p":1.77},{"c":"Bologna","e":248,"k":20000,"p":1.43},{"c":"Turin","e":246,"k":15450,"p":2.81},{"c":"Bilbao","e":243,"k":15414,"p":1.23},{"c":"Toulouse","e":236,"k":6804,"p":1.78},{"c":"Oberhausen","e":232,"k":26500,"p":2.36},{"c":"Sheffield","e":227,"k":13672,"p":1.31},{"c":"Marbella","e":224,"k":3343,"p":0.35},{"c":"A Coru\u00f1a","e":220,"k":8100,"p":0.5},{"c":"Dusseldorf","e":217,"k":15151,"p":1.78},{"c":"Floirac","e":199,"k":11300,"p":1.69},{"c":"Southampton","e":195,"k":2207,"p":0.62},{"c":"M\u00e1laga","e":192,"k":1535,"p":0.96},{"c":"Dresden","e":184,"k":12280,"p":1.47},{"c":"Murcia","e":178,"k":6382,"p":1.0},{"c":"Porto","e":173,"k":8400,"p":2.04},{"c":"Alicante","e":161,"k":600,"p":0.86},{"c":"Saint-Herblain","e":160,"k":9000,"p":1.37},{"c":"Florence","e":158,"k":8262,"p":1.64},{"c":"Bournemouth","e":152,"k":6200,"p":0.75},{"c":"Mannheim","e":150,"k":14500,"p":1.5},{"c":"Bochum","e":149,"k":4960,"p":1.98},{"c":"Nuremberg","e":149,"k":11000,"p":1.49},{"c":"Bern","e":148,"k":15000,"p":0.5},{"c":"Dortmund","e":148,"k":16140,"p":2.26},{"c":"Pamplona","e":144,"k":14000,"p":0.49},{"c":"Granada","e":143,"k":6794,"p":0.95},{"c":"Wiesbaden","e":141,"k":11000,"p":1.68},{"c":"Bremen","e":133,"k":14000,"p":1.72},{"c":"Zaragoza","e":131,"k":11000,"p":0.9},{"c":"Wolverhampton","e":131,"k":4188,"p":1.44},{"c":"Naples","e":131,"k":6541,"p":3.54},{"c":"Halifax","e":130,"k":204,"p":1.81},{"c":"Marseille","e":123,"k":8493,"p":1.84},{"c":"Norwich","e":122,"k":1554,"p":0.9},{"c":"Eckbolsheim","e":118,"k":12079,"p":1.16},{"c":"Lausanne","e":116,"k":12000,"p":0.53},{"c":"Oxford","e":115,"k":1773,"p":0.44}];
+var CITIES=[
+ {n:"Milan",pop:3.03,ceil:23400,inc:22618,ev:3870},
+ {n:"Rome",pop:4.68,ceil:11500,inc:19876,ev:2054},
+ {n:"Turin",pop:2.29,ceil:15450,inc:20879,ev:678},
+ {n:"Naples",pop:2.22,ceil:6541,inc:13451,ev:315},
+ {n:"Bologna",pop:1.11,ceil:20000,inc:22384,ev:744},
+ {n:"Florence",pop:0.90,ceil:8262,inc:19992,ev:446},
+ {n:"Padua",pop:0.69,ceil:6500,inc:19899,ev:355},
+ {n:"Verona",pop:0.66,ceil:1267,inc:20105,ev:366},
+ {n:"Bari",pop:0.65,ceil:10836,inc:14841,ev:179,target:true},
+ {n:"Rimini",pop:0.33,ceil:5845,inc:19934,ev:270}];
+var B={A:{cat:1.751,inc:0.733,room:0.334,fits:0.386,fx:0.055,prior:0},
+       B:{cat:0.396,inc:-0.006,room:0.012,fits:0.283,fx:0.084,prior:1.091}};
+var LBL={cat:"log catchment",inc:"log income per head",room:"log largest room",
+         fits:"has a room big enough",fx:"room big enough \u00d7 act size",
+         prior:"log shows already hosted"};
+var FLOOR=340,BIGM=1.308;
+var st={cap:10836,spec:"A",need:18000,sel:8},base=null;
+
+function terms(c,cap,spec,need){
+  var b=B[spec],ceil=c.target?cap:c.ceil,f=ceil>=need?1:0,bc=Math.log(need/1000)-BIGM;
+  return {cat:b.cat*Math.log(Math.max(c.pop,.001)),
+          inc:b.inc*Math.log(Math.max(c.inc,1000)/1e4),
+          room:b.room*Math.log(Math.max(ceil,FLOOR)),
+          fits:b.fits*f, fx:b.fx*f*bc, prior:b.prior*Math.log1p(c.ev), _fits:f, _ceil:ceil};
+}
+function util(c,cap,spec,need){var t=terms(c,cap,spec,need);
+  return t.cat+t.inc+t.room+t.fits+t.fx+t.prior;}
+function probs(cap,spec,need){
+  var v=CITIES.map(function(c){return util(c,cap,spec,need);});
+  var m=Math.max.apply(null,v),e=v.map(function(x){return Math.exp(x-m);});
+  var s=e.reduce(function(a,b){return a+b;},0);
+  return e.map(function(x){return x/s;});}
+
+var rowsEl=document.getElementById("rows"),refs=[],built=false;
+function build(){
+  CITIES.forEach(function(c,i){
+    var r=document.createElement("div");
+    r.className="row"+(c.target?" target":"");
+    r.setAttribute("role","button"); r.tabIndex=0;
+    r.setAttribute("aria-selected", i===st.sel?"true":"false");
+    r.innerHTML='<div class="name">'+c.n+'</div><div class="track"><div class="bar"></div>'+
+      '<div class="ghost" hidden></div></div><div class="vals"><span class="p"></span> '+
+      '<span class="delta"></span></div>';
+    function pick(){st.sel=i;render();}
+    r.addEventListener("click",pick);
+    r.addEventListener("keydown",function(e){if(e.key==="Enter"||e.key===" "){e.preventDefault();pick();}});
+    rowsEl.appendChild(r);
+    refs.push({el:r,bar:r.querySelector(".bar"),gh:r.querySelector(".ghost"),
+               p:r.querySelector(".p"),d:r.querySelector(".delta")});
+  });
+  built=true;
+}
+function pc(x){return (x*100).toFixed(1)+"%";}
+
+function drawBreak(){
+  var c=CITIES[st.sel],t=terms(c,st.cap,st.spec,st.need),b=B[st.spec];
+  var keys=["cat","inc","room","fits","fx"]; if(b.prior) keys.push("prior");
+  var tot=keys.reduce(function(a,k){return a+t[k];},0);
+  var mx=Math.max.apply(null,keys.map(function(k){return Math.abs(t[k]);}))||1;
+  var h='<div class="lbl">Score for '+c.n+' &mdash; how each term contributes</div>'+
+        '<div class="tablebox"><table><thead><tr><th>Term</th><th class="n">value</th>'+
+        '<th class="n">&times; &beta;</th><th style="width:38%">contribution</th></tr></thead><tbody>';
+  keys.forEach(function(k){
+    var w=Math.abs(t[k])/mx*100, pos=t[k]>=0;
+    var raw = k==="fits" ? (t._fits?"yes":"no")
+            : k==="fx"   ? (t._fits?"yes \u00d7 "+st.need.toLocaleString():"\u2014")
+            : k==="room" ? Math.round(t._ceil).toLocaleString()
+            : k==="cat"  ? c.pop.toFixed(2)+"m"
+            : k==="inc"  ? c.inc.toLocaleString()
+            : c.ev.toLocaleString();
+    h+='<tr><td>'+LBL[k]+'</td><td class="n">'+raw+'</td><td class="n">'+
+       (t[k]>=0?"+":"")+t[k].toFixed(2)+'</td><td>'+
+       '<div style="height:10px;border-radius:2px;width:'+w.toFixed(0)+
+       '%;background:'+(pos?"var(--pine)":"var(--ember)")+'"></div></td></tr>';
+  });
+  h+='<tr><td><strong>total score</strong></td><td class="n"></td><td class="n"><strong>'+
+     (tot>=0?"+":"")+tot.toFixed(2)+'</strong></td><td></td></tr></tbody></table></div>'+
+     '<p class="note">Probability is e<sup>score</sup> divided by the same for every city '+
+     'on the menu. Only <em>differences</em> between cities matter &mdash; adding a constant '+
+     'to every score changes nothing.</p>';
+  document.getElementById("breakdown").innerHTML=h;
+}
+
+function render(){
+  if(!built) build();
+  var p=probs(st.cap,st.spec,st.need);
+  if(!base) base=probs(10836,st.spec,st.need);
+  var mx=Math.max.apply(null,p),taken=0,worst={n:"\u2014",d:0};
+  CITIES.forEach(function(c,i){
+    var r=refs[i],d=p[i]-base[i];
+    r.el.setAttribute("aria-selected", i===st.sel?"true":"false");
+    r.bar.style.width=(p[i]/mx*100).toFixed(2)+"%";
+    r.gh.hidden=Math.abs(d)<1e-6;
+    r.gh.style.left=(base[i]/mx*100).toFixed(2)+"%";
+    r.p.textContent=pc(p[i]);
+    if(Math.abs(d)>1e-5){r.d.textContent=(d>0?"+":"")+(d*100).toFixed(1);
+      r.d.className="delta "+(d>0?"up":"down");} else r.d.textContent="";
+    if(!c.target&&d<0){taken+=-d;if(-d>worst.d)worst={n:c.n,d:-d};}
+  });
+  var bi=8;
+  document.getElementById("sBari").textContent=pc(p[bi]);
+  document.getElementById("sTaken").textContent=taken>1e-5?"\u2212"+(taken*100).toFixed(1)+" pts":"\u2014";
+  document.getElementById("sLoser").textContent=worst.d>1e-5?worst.n+" \u2212"+(worst.d*100).toFixed(1):"\u2014";
+  document.getElementById("sTotal").textContent=(p.reduce(function(a,b){return a+b;},0)*100).toFixed(1)+"%";
+  drawBreak();
+}
+var cap=document.getElementById("cap"),capOut=document.getElementById("capOut");
+cap.addEventListener("input",function(){st.cap=+cap.value;
+  capOut.textContent=st.cap.toLocaleString();render();});
+function seg(id,key,cast,after){
+  document.getElementById(id).addEventListener("click",function(e){
+    var b=e.target.closest("button");if(!b)return;
+    [].forEach.call(this.querySelectorAll("button"),function(x){x.setAttribute("aria-pressed","false");});
+    b.setAttribute("aria-pressed","true");st[key]=cast(b.dataset[key]);
+    base=probs(10836,st.spec,st.need);render();if(after)after();});
+}
+seg("spec","spec",String); seg("need","need",Number);
+render();
+
+/* ---------- helpers ---------- */
+function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+function ols(xs,ys){var n=xs.length,sx=0,sy=0,sxx=0,sxy=0;
+  for(var i=0;i<n;i++){sx+=xs[i];sy+=ys[i];sxx+=xs[i]*xs[i];sxy+=xs[i]*ys[i];}
+  var b=(n*sxy-sx*sy)/(n*sxx-sx*sx);return {b:b,a:(sy-b*sx)/n};}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+
+/* ---------- 2. scatter ---------- */
+var scMode="raw";
+function drawSC(){
+  var W=760,H=380,L=56,R=18,T=18,Bm=48,iw=W-L-R,ih=H-T-Bm;
+  var lx=SCAT.map(function(d){return Math.log(d.k);}),
+      ly=SCAT.map(function(d){return Math.log(d.e);}),
+      lp=SCAT.map(function(d){return Math.log(d.p);});
+  var X,Y,xlab,ylab;
+  if(scMode==="raw"){X=lx;Y=ly;xlab="biggest indoor room (log seats)";ylab="shows (log)";}
+  else{ // Frisch-Waugh: residualise both on log catchment
+    var rx=ols(lp,lx),ry=ols(lp,ly);
+    X=lx.map(function(v,i){return v-(rx.a+rx.b*lp[i]);});
+    Y=ly.map(function(v,i){return v-(ry.a+ry.b*lp[i]);});
+    xlab="room size, catchment removed";ylab="shows, catchment removed";}
+  var f=ols(X,Y);
+  var xmin=Math.min.apply(null,X),xmax=Math.max.apply(null,X),
+      ymin=Math.min.apply(null,Y),ymax=Math.max.apply(null,Y);
+  var px=(xmax-xmin)*.06,py=(ymax-ymin)*.08;
+  xmin-=px;xmax+=px;ymin-=py;ymax+=py;
+  var sx=function(v){return L+(v-xmin)/(xmax-xmin)*iw;},
+      sy=function(v){return T+ih-(v-ymin)/(ymax-ymin)*ih;};
+  var ink=css("--ink"),slate=css("--slate"),rule=css("--rule"),
+      pine=css("--pine"),ember=css("--ember");
+  var s='<rect x="'+L+'" y="'+T+'" width="'+iw+'" height="'+ih+'" fill="none" stroke="'+rule+'"/>';
+  SCAT.forEach(function(d,i){
+    s+='<circle cx="'+sx(X[i]).toFixed(1)+'" cy="'+sy(Y[i]).toFixed(1)+
+       '" r="4.5" fill="'+pine+'" fill-opacity=".5" stroke="'+pine+'" stroke-width=".8"><title>'+
+       esc(d.c)+" \u2014 "+d.e.toLocaleString()+" shows, "+d.k.toLocaleString()+
+       " seats, "+d.p+"m catchment</title></circle>";
+  });
+  s+='<line x1="'+sx(xmin).toFixed(1)+'" y1="'+sy(f.a+f.b*xmin).toFixed(1)+
+     '" x2="'+sx(xmax).toFixed(1)+'" y2="'+sy(f.a+f.b*xmax).toFixed(1)+
+     '" stroke="'+ember+'" stroke-width="2.4"/>';
+  s+='<text x="'+(L+iw-8)+'" y="'+(T+18)+'" fill="'+ember+'" text-anchor="end" font-size="13" '+
+     'font-family="IBM Plex Mono, monospace">slope '+(f.b>=0?"+":"")+f.b.toFixed(3)+'</text>';
+  s+='<text x="'+(L+iw/2)+'" y="'+(H-14)+'" fill="'+slate+'" text-anchor="middle" font-size="11" '+
+     'font-family="IBM Plex Sans, sans-serif">'+xlab+'</text>';
+  s+='<text transform="translate(16,'+(T+ih/2)+') rotate(-90)" fill="'+slate+
+     '" text-anchor="middle" font-size="11" font-family="IBM Plex Sans, sans-serif">'+ylab+'</text>';
+  document.getElementById("sc").innerHTML=s;
+  document.getElementById("scCap").textContent = scMode==="raw"
+    ? "The 70 busiest markets; hover for any city's numbers. The line is fitted to these 70, so it differs slightly from the all-203 figure below."
+    : "The same markets with catchment partialled out of both axes. Same data, same cities \u2014 more than half the slope was population all along.";
+}
+document.getElementById("ctlToggle").addEventListener("click",function(e){
+  var b=e.target.closest("button");if(!b)return;
+  [].forEach.call(this.querySelectorAll("button"),function(x){x.setAttribute("aria-pressed","false");});
+  b.setAttribute("aria-pressed","true");scMode=b.dataset.ctl;drawSC();});
+drawSC();
+
+/* ---------- 3. catchment ---------- */
+var CAT=[{n:"Guildford",raw:13792222,ex:855239,ev:45,
+          note:"Almost all of that 13.8 million is London, forty kilometres away. Guildford keeps 6% \u2014 it is a suburb of the best-served market in Europe, not an under-served one."},
+         {n:"Hanley",raw:7213993,ex:915800,ev:45,
+          note:"Manchester and Birmingham between them account for most of Hanley's radius. It keeps 13%."},
+         {n:"Manchester",raw:9944277,ex:3325417,ev:2216,
+          note:"Even a major city loses two thirds of a raw radius once its neighbours claim their own residents. 33% kept."},
+         {n:"London",raw:15604999,ex:8029204,ev:6522,
+          note:"London keeps 51% \u2014 the largest exclusive catchment in the data, and still only half its raw circle."},
+         {n:"Bari",raw:1672497,ex:1672497,ev:76,
+          note:"Bari keeps 100%. There is no competing market inside 60 km, so every one of those people really does have Bari as their nearest option. That is what an isolated market looks like."}];
+var catI=0;
+function drawCAT(){
+  var d=CAT[catI],W=760,H=210,L=110,R=100,T=34,iw=W-L-R;
+  var mx=Math.max(d.raw,d.ex),slate=css("--slate"),pine=css("--pine"),
+      ember=css("--ember"),rule=css("--rule"),ink=css("--ink");
+  function bar(y,v,col,lab){
+    var w=v/mx*iw;
+    return '<text x="'+(L-10)+'" y="'+(y+17)+'" fill="'+slate+'" text-anchor="end" font-size="11" '+
+      'font-family="IBM Plex Mono, monospace">'+lab+'</text>'+
+      '<rect x="'+L+'" y="'+y+'" width="'+Math.max(w,2).toFixed(1)+'" height="26" fill="'+col+'" rx="2"/>'+
+      '<text x="'+(L+w+9).toFixed(1)+'" y="'+(y+18)+'" fill="'+ink+'" font-size="12" '+
+      'font-family="IBM Plex Mono, monospace">'+(v/1e6).toFixed(2)+'m</text>';
+  }
+  var s=bar(T,d.raw,pine,"within 60 km")+bar(T+52,d.ex,ember,"nearest market");
+  var kept=d.ex/d.raw;
+  s+='<text x="'+L+'" y="'+(T+112)+'" fill="'+slate+'" font-size="12" '+
+     'font-family="IBM Plex Mono, monospace">keeps '+(kept*100).toFixed(0)+'% \u00b7 '+
+     d.ev.toLocaleString()+' shows</text>';
+  s+='<rect x="'+L+'" y="'+(T+124)+'" width="'+iw+'" height="8" fill="'+rule+'" rx="2"/>'+
+     '<rect x="'+L+'" y="'+(T+124)+'" width="'+(kept*iw).toFixed(1)+'" height="8" fill="'+ember+'" rx="2"/>';
+  document.getElementById("cat").innerHTML=s;
+  document.getElementById("catNote").textContent=d.note;
+}
+document.getElementById("catPick").addEventListener("click",function(e){
+  var b=e.target.closest("button");if(!b)return;
+  [].forEach.call(this.querySelectorAll("button"),function(x){x.setAttribute("aria-pressed","false");});
+  b.setAttribute("aria-pressed","true");catI=+b.dataset.i;drawCAT();});
+drawCAT();
+
+/* ---------- 4. staggered DiD grid ---------- */
+var YRS=[2014,2015,2016,2017,2018,2019,2022,2023,2024];
+var COH=[{g:2016,l:"opened 2016"},{g:2018,l:"opened 2018"},
+         {g:2022,l:"opened 2022"},{g:0,l:"never opened one"}];
+var FOCUS={g:2018,t:2022}, didMode="cs";
+function drawDID(){
+  var host=document.getElementById("didGrid");
+  var h='<div class="grid" style="grid-template-columns:8.5rem repeat('+YRS.length+',minmax(46px,1fr));min-width:560px">';
+  h+='<div class="glabel"></div>';
+  YRS.forEach(function(y){h+='<div class="glabel" style="justify-content:center">'+y+'</div>';});
+  COH.forEach(function(c){
+    h+='<div class="glabel">'+c.l+'</div>';
+    YRS.forEach(function(y){
+      var treated = c.g>0 && y>=c.g;
+      var cls = treated?"post":"pre", txt="";
+      var isFocusRow = c.g===FOCUS.g;
+      // who may act as a control for the focus comparison?
+      var notYet = (c.g===0) || (c.g > Math.max(FOCUS.g,FOCUS.t));
+      var already = c.g>0 && c.g<=FOCUS.g && c.g!==FOCUS.g;
+      if(!isFocusRow){
+        if(notYet){cls="ctl";txt="ctl";}
+        else if(didMode==="twfe" && already){cls="bad";txt="ctl";}
+      } else if(y===FOCUS.t){ txt="?"; }
+      h+='<div class="cell '+cls+'">'+txt+'</div>';
+    });
+  });
+  h+='</div>';
+  host.innerHTML=h;
+  document.getElementById("didCap").innerHTML = didMode==="cs"
+    ? "Estimating the effect for cities that opened in <strong>2018</strong>, measured at <strong>2022</strong>. "+
+      "Callaway&ndash;Sant'Anna will only use cities that are <em>still untreated</em> &mdash; those that opened in 2022 or never. "+
+      "The 2016 cohort is excluded, because by 2022 it is carrying its own treatment effect."
+    : "The same comparison under two-way fixed effects. It also draws on the <strong>2016 cohort</strong> as a control "+
+      "(marked red) &mdash; cities that already have their arena. Whatever their room did for them gets subtracted from the 2018 cohort's effect.";
+}
+document.getElementById("didToggle").addEventListener("click",function(e){
+  var b=e.target.closest("button");if(!b)return;
+  [].forEach.call(this.querySelectorAll("button"),function(x){x.setAttribute("aria-pressed","false");});
+  b.setAttribute("aria-pressed","true");didMode=b.dataset.m;drawDID();});
+drawDID();
+
+/* ---------- 5. event study ---------- */
+var ES=[{e:-5,v:-2.12},{e:-4,v:-1.68},{e:-3,v:-1.59},{e:-2,v:-1.02},
+        {e:0,v:1.57},{e:1,v:1.92},{e:2,v:2.30},{e:3,v:1.05},
+        {e:4,v:2.90},{e:5,v:6.33},{e:6,v:4.56},{e:7,v:3.16},{e:8,v:1.83}];
+var SLOPE=0.340,INTER=-0.414,detr=false;
+function drawES(){
+  var W=760,H=330,L=52,R=18,T=22,Bm=52,iw=W-L-R,ih=H-T-Bm;
+  var vals=ES.map(function(d){return detr?d.v-(INTER+SLOPE*d.e):d.v;});
+  var lo=Math.min(-3,Math.min.apply(null,vals))-.5,
+      hi=Math.max.apply(null,vals)+.9;
+  var x=function(e){return L+(e+5)/13*iw;},
+      y=function(v){return T+ih-(v-lo)/(hi-lo)*ih;};
+  var ink=css("--ink"),slate=css("--slate"),rule=css("--rule"),
+      pine=css("--pine"),ember=css("--ember");
+  var s='';
+  [-2,0,2,4,6].forEach(function(t){
+    if(t<lo||t>hi)return;
+    s+='<line x1="'+L+'" y1="'+y(t).toFixed(1)+'" x2="'+(W-R)+'" y2="'+y(t).toFixed(1)+
+       '" stroke="'+rule+'"/><text x="'+(L-9)+'" y="'+(y(t)+4).toFixed(1)+'" fill="'+slate+
+       '" font-size="11" font-family="IBM Plex Mono, monospace" text-anchor="end">'+t+'</text>';});
+  s+='<line x1="'+L+'" y1="'+y(0).toFixed(1)+'" x2="'+(W-R)+'" y2="'+y(0).toFixed(1)+
+     '" stroke="'+ink+'" stroke-width="1.2"/>';
+  s+='<line x1="'+x(-0.5).toFixed(1)+'" y1="'+T+'" x2="'+x(-0.5).toFixed(1)+'" y2="'+(T+ih)+
+     '" stroke="'+slate+'" stroke-dasharray="3 3" opacity=".7"/>';
+  s+='<text x="'+(x(-0.5)-6).toFixed(1)+'" y="'+(T+12)+'" fill="'+slate+'" font-size="10" '+
+     'text-anchor="end" font-family="IBM Plex Mono, monospace">room opens</text>';
+  var bw=iw/14*.66;
+  ES.forEach(function(d,i){
+    var v=vals[i],yy=Math.min(y(v),y(0)),hg=Math.abs(y(v)-y(0));
+    var col=d.e<0?slate:(v>=0?pine:ember);
+    s+='<rect x="'+(x(d.e)-bw/2).toFixed(1)+'" y="'+yy.toFixed(1)+'" width="'+bw.toFixed(1)+
+       '" height="'+Math.max(hg,1).toFixed(1)+'" fill="'+col+'" rx="1"><title>'+
+       (d.e<0?"":"+")+d.e+" years: "+(v>=0?"+":"")+v.toFixed(2)+" visits/yr</title></rect>";
+    if(d.e%2===0||d.e===-5)
+      s+='<text x="'+x(d.e).toFixed(1)+'" y="'+(H-Bm+18)+'" fill="'+slate+'" font-size="11" '+
+         'font-family="IBM Plex Mono, monospace" text-anchor="middle">'+d.e+'</text>';});
+  if(!detr){
+    s+='<line x1="'+x(-5).toFixed(1)+'" y1="'+y(INTER+SLOPE*-5).toFixed(1)+'" x2="'+x(8).toFixed(1)+
+       '" y2="'+y(INTER+SLOPE*8).toFixed(1)+'" stroke="'+ember+'" stroke-width="1.7" stroke-dasharray="5 4"/>'+
+       '<text x="'+(W-R)+'" y="'+(y(INTER+SLOPE*8)-9).toFixed(1)+'" fill="'+ember+'" font-size="11" '+
+       'font-family="IBM Plex Mono, monospace" text-anchor="end">the trend they were already on</text>';}
+  s+='<text x="'+(L+iw/2).toFixed(1)+'" y="'+(H-10)+'" fill="'+slate+'" font-size="11" '+
+     'font-family="IBM Plex Sans, sans-serif" text-anchor="middle">years since the room opened</text>';
+  s+='<text x="'+(L-9)+'" y="'+(T-7)+'" fill="'+slate+'" font-size="10" '+
+     'font-family="IBM Plex Mono, monospace" text-anchor="end">visits/yr</text>';
+  document.getElementById("es").innerHTML=s;
+  document.getElementById("esCap").textContent = detr
+    ? "With the pre-existing trend subtracted. The effect survives at roughly half its raw size and fades after year six."
+    : "Raw effect. If the design held, the grey bars left of zero would sit on the dashed line at zero \u2014 they do not, and that is the warning.";
+}
+document.getElementById("trendToggle").addEventListener("click",function(e){
+  var b=e.target.closest("button");if(!b)return;
+  [].forEach.call(this.querySelectorAll("button"),function(x){x.setAttribute("aria-pressed","false");});
+  b.setAttribute("aria-pressed","true");detr=b.dataset.trend==="on";drawES();});
+drawES();
+
+if(window.matchMedia){
+  var mq=window.matchMedia("(prefers-color-scheme: dark)");
+  var redraw=function(){drawSC();drawCAT();drawES();};
+  if(mq.addEventListener)mq.addEventListener("change",redraw);
+  else if(mq.addListener)mq.addListener(redraw);
+}
+})();
+</script>

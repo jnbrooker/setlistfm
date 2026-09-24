@@ -63,7 +63,19 @@ DEMO_DB = r"C:\database-creation\demographicdata.db"
 # a measurable audience; D and E are mostly small local bookings and including
 # them would drown the signal we are looking for. Overridable, and whatever is
 # chosen is recorded in the manifest, because it materially changes every count.
-DEFAULT_CATEGORIES = ("Category A", "Category B", "Category C")
+# Artist tiers the model is fitted on.
+#
+# D is included, and it is the largest of the four by tour count: 4,348 tours
+# against 897 for A and 2,745 for B. Those acts are almost never the ones a new
+# arena is built for -- they average 3,057 capacity -- but they are exactly the
+# traffic that says whether a market's MID-SIZE rooms fit, which is what the
+# `log fit gap` variable measures.
+#
+# E is deliberately excluded. At 21,182 tours averaging 1,680 capacity it would
+# swamp the sample with acts no venue decision turns on, and every probability
+# in the model would be diluted by menus full of cities competing for club
+# shows.
+DEFAULT_CATEGORIES = ("Category A", "Category B", "Category C", "Category D")
 
 # A city needs at least this many shows before it is worth modelling. Below it
 # the counts are too noisy to support any statement.

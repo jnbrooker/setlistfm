@@ -339,21 +339,16 @@ def main():
 
     dt = did.detrend(gt)
     if dt.get("ok"):
-        print(f"
-PRE-TREND SENSITIVITY")
+        print("\nPRE-TREND SENSITIVITY")
         print(f"        treated cities were already gaining "
               f"{dt['slope_per_year']:+.2f} {unit} before their room opened")
         print(f"        raw post-opening effect        {dt['raw_att']:+.2f}")
         print(f"        with that trend removed        {dt['detrended_att']:+.2f}")
-        print(f"        The second figure extrapolates the pre-trend across "
-              f"the post period and
-        subtracts it. That is a "
-              f"sensitivity, not a correction: it assumes the trend
-        "
-              f"would have continued, which is as unverifiable as the "
-              f"parallel-trends
-        assumption it patches. Read the two "
-              f"as a range.")
+        print("        The second figure extrapolates the pre-trend across "
+              "the post period and subtracts it. That is a sensitivity, not "
+              "a correction: it assumes the trend would have continued, "
+              "which is as unverifiable as the parallel-trends assumption it "
+              "patches. Read the two as a range.")
 
     if a.bootstrap:
         log(f"bootstrapping {a.bootstrap} resamples of the city list ...")

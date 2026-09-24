@@ -1,7 +1,7 @@
 {
-  "tag": "since2012",
-  "built_at": "2026-09-24T09:42:29",
-  "since": "2012-01-01",
+  "tag": "2026-09-24",
+  "built_at": "2026-09-24T09:40:18",
+  "since": "2023-01-01",
   "categories": [
     "Category A",
     "Category B",
@@ -27,15 +27,15 @@
   "min_city_events": 5,
   "market_radius_km": 15,
   "rows": {
-    "markets": 1464,
-    "cities": 2435,
-    "market_members": 971,
-    "venues": 24570,
-    "tours": 14031,
-    "tour_city": 110299
+    "markets": 910,
+    "cities": 1309,
+    "market_members": 399,
+    "venues": 11735,
+    "tours": 5428,
+    "tour_city": 37889
   },
   "event_date_range": [
-    "2012-01-01",
+    "2023-01-01",
     "2026-09-21"
   ],
   "sources": {
@@ -57,7 +57,7 @@
     "Catchments stop at national borders, so cross-border cities are understated.",
     "Demographics cover DE, GB, FR, IT, ES, PT, CH only; elsewhere the fields are null, not zero.",
     "Artist tiers included: Category A, Category B, Category C, Category D.",
-    "Shows on or after 2012-01-01.",
+    "Shows on or after 2023-01-01.",
     "Counts are shows, not attendance.",
     "Cities within 15 km of a bigger neighbour are merged into it as one market (Assago into Milan, Casalecchio di Reno into Bologna). Every merge is listed in the market_members table.",
     "This extract is a snapshot; the source database changes continuously."

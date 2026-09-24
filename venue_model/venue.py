@@ -241,7 +241,8 @@ def reliability(val):
 # Market pull: delete the venue and ask the model again
 # ---------------------------------------------------------------------------
 
-def _utility_without(menu, spec, target, ceil_in, ceil_out, ceil_any):
+def _utility_without(menu, spec, target, ceil_in, ceil_out, ceil_any,
+                     rest=None):
     """
     The utility vector with the target market's ceilings lowered.
 
@@ -256,6 +257,21 @@ def _utility_without(menu, spec, target, ceil_in, ceil_out, ceil_any):
     kind = sub["act_plays"].values
     sub["ceiling"] = np.where(kind == "indoor", ceil_in,
                               np.where(kind == "outdoor", ceil_out, ceil_any))
+
+    # Removing a room can also change the CLOSEST rung, not just the ceiling.
+    # If the deleted venue was the best fit for an act, the next-nearest room
+    # takes over -- so best_room is re-derived from the ladder that remains.
+    # Leaving it stale would credit the market with a room it no longer has.
+    if rest is not None and "best_room" in sub:
+        import choice as _choice
+        lads = {}
+        for k, want in (("indoor", "inside"), ("outdoor", "outside")):
+            lads[k] = np.sort(rest.loc[rest["io"] == want, "capacity"].values)
+        lads["either"] = np.sort(rest["capacity"].values)
+        sub["best_room"] = [
+            _choice.nearest_room(lads, n, kd)
+            for n, kd in zip(pd.to_numeric(sub["room_needed"], errors="coerce"),
+                             sub["act_plays"])]
     X_sub, _ = layer2.design(sub, spec, s["consts"])
     v = s["v"].copy()
     v[target] = X_sub @ s["beta"]
@@ -294,7 +310,8 @@ def market_pull(menu, spec, ex, market_row, venue, lad=None):
                 "ceilings_now": cur, "ceilings_without": without,
                 "per_tour": pd.DataFrame()}
 
-    v_without = _utility_without(menu, spec, target, *without)
+    v_without = _utility_without(menu, spec, target, *without,
+                                 rest=lad[lad["venue"] != venue])
     p_without = logit.choice_probabilities(v_without, menu["offsets"])
     expected_without = float(p_without[target].sum())
 

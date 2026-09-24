@@ -422,3 +422,55 @@ def rank_sentence(change_table, market):
                 f"{chance} — the cities above it are too far ahead to pass.")
     return (f"**{market} stays {ordinal(ra)}** and its chance is unchanged at "
             f"{r['chance_before']:.1%}: the room does nothing for this act.")
+
+
+# ---------------------------------------------------------------------------
+# How much of a city's calendar this model can see at all
+# ---------------------------------------------------------------------------
+
+def touring_share(ex, market, code):
+    """
+    The share of a market's shows that come from multi-city tours.
+
+    WHY THIS BELONGS NEXT TO EVERY PROBABILITY ON THE SCREEN
+
+    The choice model only ever sees tours that played two or more cities in a
+    country, because only those involved a choice between cities. A one-off
+    local gig, a residency or a single-date festival had no menu: nothing was
+    traded off, so there is nothing to estimate, and including them would
+    dilute every probability while teaching the model nothing.
+
+    That exclusion is right, and it is also a limit worth putting a number on.
+    Across Italy the model sees 49% of shows. By market it ranges from 64% in
+    Padua to 9% in Sanremo, whose calendar is one festival rather than a
+    touring circuit. A figure that describes half a city's year should say so,
+    and one that describes a tenth of it should say so loudly.
+
+    Nothing here corrects the model. It states its coverage.
+    """
+    tc, cities, tours = ex["tour_city"], ex["cities"], ex["tours"]
+    members = set(cities.loc[(cities["market"] == market)
+                             & (cities["countryCode"] == code), "city"])
+    here = tc[(tc["countryCode"] == code) & (tc["city"].isin(members))]
+    if here.empty:
+        return None
+    n_cities = tours.set_index("tour")["cities"]
+    here = here.assign(tour_cities=here["tour"].map(n_cities))
+    seen = float(pd.to_numeric(
+        here.loc[here["tour_cities"] >= 2, "events"], errors="coerce").sum())
+
+    row = ex["markets"]
+    row = row[(row["city"] == market) & (row["countryCode"] == code)]
+    total = float(pd.to_numeric(row["events"], errors="coerce").iloc[0]) if len(row) else 0.0
+    if not total:
+        return None
+    share = seen / total
+    if share >= 0.55:
+        verdict = "the model sees most of this city's calendar"
+    elif share >= 0.3:
+        verdict = "the model sees about half of this city's calendar"
+    else:
+        verdict = ("MOST OF THIS CITY'S SHOWS ARE NOT TOURING DATES, so the "
+                   "model is describing a small corner of its year")
+    return {"touring_dates": seen, "all_events": total, "share": share,
+            "verdict": verdict}

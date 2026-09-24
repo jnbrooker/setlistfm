@@ -394,8 +394,16 @@ def where_skippers_went(ex, market_row, skipped):
     tc = ex["tour_city"]
     country = market_row["countryCode"]
     e = tc[(tc["countryCode"] == country) & (tc["tour"].isin(set(skipped["tour"])))]
-    city_to_market = ex["cities"].set_index("city")["market"]
-    e = e.assign(market=e["city"].map(city_to_market))
+    # Keyed on (country, city), not city alone. City names are not unique
+    # across countries -- the since2012 extract has a Lugo in Spain and a Lugo
+    # in Italy -- and a single-key index is both wrong (an Italian city could
+    # map to a Spanish market) and fatal, because pandas refuses to `.map`
+    # through a non-unique index at all. Every other join of cities to markets
+    # in this project already uses the pair; this one did not, and one
+    # duplicated name out of 1,865 took the whole app down.
+    city_to_market = ex["cities"].set_index(["countryCode", "city"])["market"]
+    e = e.assign(market=pd.MultiIndex.from_arrays(
+        [e["countryCode"], e["city"]]).map(city_to_market))
     g = (e.groupby("market")
          .agg(tours_caught=("tour", "nunique"), dates=("events", "sum"),
               largest_room_used=("largest_capacity_played", "max"))

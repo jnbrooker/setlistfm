@@ -84,6 +84,18 @@ def att_gt(panel, unit="unit", time="time", outcome="y", cohort="cohort",
 
     wide = d.pivot_table(index="unit", columns="time", values="y")
     g_of = d.groupby("unit")["g"].first()
+    return _att_gt_wide(wide, g_of, control)
+
+
+def _att_gt_wide(wide, g_of, control="notyet"):
+    """
+    The same estimator on an already-pivoted matrix.
+
+    Split out so the bootstrap can resample rows of `wide` directly. The first
+    version rebuilt a long DataFrame for every resample -- 921 city filters
+    times 200 reps -- which turned a two-minute job into an overnight one for
+    no gain, since the pivot is the only thing that needed doing once.
+    """
     times = sorted(wide.columns)
     cohorts = sorted(c for c in g_of.unique() if c > 0)
 
@@ -191,27 +203,36 @@ def bootstrap(panel, reps=300, seed=0, unit="unit", time="time", outcome="y",
     across years, and resampling rows would treat fifteen years of one city as
     fifteen independent facts. That would produce intervals far too narrow, in
     the same way unclustered standard errors do in Layer 2.
+
+    The panel is pivoted once and each resample takes rows of that matrix, so
+    the cost per replication is the estimator itself and nothing else.
     """
     rng = np.random.default_rng(seed)
-    units = panel[unit].unique()
+    d = panel[[unit, time, outcome, cohort]].copy()
+    d.columns = ["unit", "time", "y", "g"]
+    d["g"] = pd.to_numeric(d["g"], errors="coerce").fillna(0).astype(int)
+    wide = d.pivot_table(index="unit", columns="time", values="y")
+    g_of = d.groupby("unit")["g"].first().reindex(wide.index)
+
+    n = len(wide)
     overall, es = [], []
     for _ in range(int(reps)):
-        pick = rng.choice(units, size=len(units), replace=True)
-        # a resampled city can appear twice, so it needs a distinct id or the
-        # pivot would silently collapse the duplicates into one row
-        parts = []
-        for i, u in enumerate(pick):
-            q = panel[panel[unit] == u].copy()
-            q[unit] = f"{u}__{i}"
-            parts.append(q)
-        samp = pd.concat(parts, ignore_index=True)
-        gt = att_gt(samp, unit, time, outcome, cohort, control)
+        pick = rng.integers(0, n, size=n)
+        # A city drawn twice needs a distinct label, or the pivot index would
+        # collapse the duplicates and quietly shrink the sample.
+        w = wide.iloc[pick].copy()
+        g = g_of.iloc[pick].copy()
+        labels = [f"{i}" for i in range(n)]
+        w.index, g.index = labels, labels
+
+        gt = _att_gt_wide(w, g, control)
         if gt.empty:
             continue
         overall.append(overall_att(gt))
         e = event_study(gt)
         if not e.empty:
             es.append(e.set_index("years since opening")["effect"])
+
     overall = np.array([v for v in overall if np.isfinite(v)])
     band = pd.DataFrame(es).quantile([0.05, 0.95]).T if es else pd.DataFrame()
     return {"overall": overall,
